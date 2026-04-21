@@ -1,0 +1,17 @@
+{
+  "name": "forza-horizon-wiki",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev Docs/wiki",
+    "docs:build": "vitepress build Docs/wiki",
+    "docs:preview": "vitepress preview Docs/wiki"
+  },
+  "devDependencies": {
+    "vitepress": "^1.5.0",
+    "vue": "^3.5.0",
+    "js-yaml": "^4.1.0",
+    "@types/js-yaml": "^4.0.9"
+  }
+}

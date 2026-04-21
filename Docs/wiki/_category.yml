@@ -1,0 +1,53 @@
+# Forza Horizon 攻略庫分類定義
+# 用途：
+#   1. wiki-integrator 判定新來源片段應歸屬哪個分類
+#   2. wiki-site-builder 產生網站側邊欄與首頁大分類卡片
+#   3. 索引檔 INDEX.md / wiki/index.md 的順序依本檔為準
+#
+# 新增分類流程：
+#   1. 在本檔新增條目
+#   2. mkdir Docs/wiki/{slug}/
+#   3. （可選）建立 Docs/wiki/{slug}/index.md 作為分類總覽
+
+categories:
+  - slug: tuning
+    name: 車輛調校
+    icon: 🔧
+    short: 懸吊、差速器、阻尼、齒比、胎壓等可調參數的原理與數值
+    keywords: [調校, 懸吊, 阻尼, 差速器, 齒比, 胎壓, 傾角, 防傾桿, 定風翼, Tune]
+    order: 1
+
+  - slug: upgrades
+    name: 車輛改裝
+    icon: ⚙️
+    short: 配件升級、PI 性價比、引擎/進氣/輪胎/傳動選擇策略
+    keywords: [改裝, 升級, PI, 引擎, 渦輪, 增壓, 輪胎, 配件, Build]
+    order: 2
+
+  - slug: driving
+    name: 駕駛操作
+    icon: 🏁
+    short: 走線、煞車、過彎、漂移、起步等駕駛技巧
+    keywords: [走線, 煞車, 過彎, 漂移, 甩尾, 起步, 路感, 手感, Technique]
+    order: 3
+
+  - slug: cars
+    name: 車輛介紹
+    icon: 🚗
+    short: 單一車型分析、車種類型（肌肉車/GT/拉力車）、車系比較
+    keywords: [車型, 車系, 肌肉車, GT, 拉力車, 賽車, 越野車, 超跑]
+    order: 4
+
+  - slug: settings
+    name: 遊戲設定
+    icon: 🎮
+    short: 畫面、控制器、方向盤、輔助、音效等遊戲內設定
+    keywords: [設定, 控制器, 方向盤, 輔助, 畫面, 鍵位, 設定檔]
+    order: 5
+
+  - slug: events
+    name: 活動與賽事
+    icon: 🏆
+    short: 季節活動、故事模式、EventLab、成就、經濟系統
+    keywords: [活動, 季節, 故事, EventLab, 成就, 金幣, 經濟, 超級七]
+    order: 6

@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build output
+Docs/wiki/.vitepress/dist/
+Docs/wiki/.vitepress/cache/
+
+# IDE / editor workspace files
+*.code-workspace
+.vscode/
+.idea/
+
+# Claude（user-specific，專案設定與 skills 照常提交）
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
