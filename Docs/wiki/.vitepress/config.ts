@@ -8,8 +8,9 @@ export default defineConfig({
   lastUpdated: true,
   cleanUrls: true,
 
-  // 本地 dev 保持 '/'；部署 GitHub Pages 前改為 '/你的-repo-名/'
-  base: '/',
+  // GitHub Pages 部署對應 https://dddgood.github.io/fh-wiki/
+  // 本地 dev 時 VitePress 會處理 base prefix，訪問 http://localhost:5173/fh-wiki/
+  base: '/fh-wiki/',
 
   srcExclude: ['**/_raw/**', '**/_sources/**', '**/_category.yml'],
 
