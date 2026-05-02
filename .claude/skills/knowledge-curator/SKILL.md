@@ -2,7 +2,8 @@
 name: knowledge-curator
 description: >
   Forza Horizon 攻略庫策展助手。當使用者提供外部來源（網頁、Bilibili/YouTube 影片、Reddit/論壇貼文、PDF、圖片、本機檔案等）並希望評估是否收錄到 Docs/ 攻略庫時使用。
-  先解析內容、提供繁中簡介，嚴格審查是否與現有攻略重複，由使用者決定是否存入；確認存入後產出完整繁體中文版本。
+  YouTube/Bilibili URL 直接用 yt-dlp 抓 SRT，不要詢問使用者。
+  審查重點是「找出 wiki 還沒寫到的細節」，主題重疊不是拒收理由，僅作者明確聲明過時的部分可丟棄。確認後產出完整繁體中文整理版到 _sources/。
 user-invokable: true
 argument-hint: "<URL 或檔案路徑>"
 ---
@@ -11,8 +12,8 @@ argument-hint: "<URL 或檔案路徑>"
 
 ## 核心職責
 
-作為 `Docs/` 攻略庫的**守門員**，負責外部來源的進入審查。
-核心理念是**寧缺勿濫**——攻略庫的價值在精煉實用，不在數量堆疊。
+作為 `Docs/` 攻略庫的**差異補完員**，負責外部來源的內容差異審查。
+核心理念是**盡可能保留細節**——凡是 wiki 還沒寫到的數據、設定範圍、原理說明、社群梗、UI 怪癖**一律補上**，主題重疊不是拒收理由。**唯一**可丟棄的是作者本人明確聲明已過時的部分。
 
 ## 專案目錄約定
 
@@ -31,7 +32,7 @@ D:\Projects\Forza Horizon\
 1. **不要急著存入**——永遠先完成簡介與審查，由使用者決定是否收錄
 2. **所有收錄內容必須是完整繁體中文版本**——不是摘要，是完整翻譯（簡體來源須全文轉繁）
 3. **必須完整保留所有遊戲具體數值**——胎壓、外傾角、阻尼、差速器百分比、車高 cm、齒比等一個都不能漏
-4. **不造成攻略庫膨脹**——若現有文件已充分覆蓋相同車種／主題／技巧，就不需要再加
+4. **盡可能保留細節**——凡是 wiki 沒寫到的數據／設定／原理／社群梗一律收錄，主題重疊不是拒收理由；**唯一例外**是作者明確聲明過時的部分
 5. **車廠／車型／遊戲專有名詞保留原拼寫**——例：BRZ、Evora、Viper、Dodge、Lotus、S1、A 組
 
 ## 流程
@@ -42,8 +43,9 @@ D:\Projects\Forza Horizon\
 
 | 來源類型 | 優先策略 | 備選策略 |
 |---------|---------|---------|
-| Bilibili／YouTube 影片（有 SRT 字幕檔） | **交由 `bilibili-to-doc` skill 處理** | — |
-| Bilibili／YouTube URL（無下載字幕） | markitdown（需線上字幕） | WebSearch 搜尋文字稿或摘要 |
+| Bilibili／YouTube 影片（已有本機 SRT 字幕檔） | **交由 `bilibili-to-doc` skill 處理** | — |
+| YouTube URL（未下載字幕） | **直接用 `yt-dlp` 下載 SRT 到 `Docs/_raw/`**（見下方步驟） | — |
+| Bilibili URL（未下載字幕） | `yt-dlp` 也支援 Bilibili，同樣流程 | markitdown 線上字幕 |
 | 一般網頁 URL（攻略站、Wiki、Fandom、Steam 指南等） | markitdown → 定位文章本體 | WebFetch |
 | Reddit／ForzaForum／論壇帖文 | markitdown | WebFetch |
 | PDF（短，≤20 頁） | Read 工具直接閱讀 | markitdown |
@@ -51,6 +53,31 @@ D:\Projects\Forza Horizon\
 | 本機 Office 檔案（.docx/.xlsx/.pptx） | markitdown | — |
 | 圖片（調校截圖、數值表截圖） | Read 工具直接讀（多模態） | 請使用者提供文字版 |
 | 其他 | WebFetch + WebSearch 輔助 | 請使用者貼上文字 |
+
+#### YouTube／Bilibili SRT 下載（基礎技能，不需詢問使用者）
+
+本機已安裝 `yt-dlp 2026.02.21`，遇到 YT/Bilibili URL **直接執行**，不要先試 WebFetch、不要建議使用者手動下載。
+
+**單支下載**：
+```bash
+yt-dlp --write-auto-subs --sub-langs "en-orig" --sub-format srt --convert-subs srt --skip-download \
+  -o "Docs/_raw/%(id)s.%(ext)s" "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+**字幕語言選擇**：
+- 英文影片用 `en-orig`（YouTube 自動字幕原始版）
+- 中文影片用 `zh-Hant` 或 `zh-Hans`，視作者上傳語言
+- 不確定時先 `yt-dlp --list-subs --skip-download URL` 確認可用語言
+
+**批次下載多支** 用 bash for 迴圈：
+```bash
+for vid in ID1 ID2 ID3; do
+  yt-dlp --write-auto-subs --sub-langs "en-orig" --sub-format srt --convert-subs srt --skip-download \
+    -o "Docs/_raw/%(id)s.%(ext)s" "https://www.youtube.com/watch?v=$vid"
+done
+```
+
+下載成功後 SRT 已在 `Docs/_raw/<id>.<lang>.srt`，可直接交棒 `bilibili-to-doc` 處理（含英文 SRT，需要英譯中由本 skill 或 bilibili-to-doc 內處理）。
 
 #### markitdown 使用注意
 
