@@ -1,6 +1,7 @@
 ---
 title: QuickTune 基準值總表（Part 2）
 category: tuning
+order: 120
 tags: [QuickTune, 參考, 基準值, 胎壓, 定位, 防傾桿, 彈簧, 車高, 阻尼, 煞車, 差速器, 齒比, 空力]
 related_cars: []
 pi_class: []
