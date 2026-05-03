@@ -1,0 +1,2 @@
+- [YouTube 字幕下載是基礎技能](feedback_youtube_srt_workflow.md) — 直接用 yt-dlp 抓 SRT，不要問使用者
+- [審查原則改為「盡可能保留細節」](feedback_curation_thoroughness.md) — wiki 沒寫的細節／原理一律補上，僅作者聲明過時可丟

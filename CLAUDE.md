@@ -31,7 +31,16 @@ D:\Projects\Forza Horizon\
 │       ├── knowledge-curator\    # 外部來源審查與收錄 → _sources/
 │       ├── wiki-integrator\      # _sources/ → wiki/ 去蕪存菁（核心整合）
 │       ├── wiki-doc-writer\      # 從 _sources/ 綜合撰寫 wiki 主題長文
-│       └── wiki-site-builder\    # VitePress 靜態網站建置與 GitHub Pages 部署
+│       ├── wiki-site-builder\    # VitePress 靜態網站建置與 GitHub Pages 部署
+│       └── race-analyst\         # 賽事 telemetry summary 分析 → analysis.md
+├── scripts\
+│   └── forza_telemetry\          # FH5 UDP 遙測錄製與分析工具
+│       ├── recorder.py           # UDP listener + 賽事偵測狀態機
+│       ├── packet.py / session.py
+│       ├── summarize.py          # raw.csv → summary.md
+│       └── README.md             # 完整工具文件
+├── data\forza_telemetry\         # gitignored
+│   └── sessions\                 # 錄製的賽事資料夾（含 raw.csv / meta.json / summary.md / analysis.md）
 └── memory\                       # 用戶偏好與上下文記憶
 ```
 
@@ -54,6 +63,34 @@ D:\Projects\Forza Horizon\
 - `_sources/` = **單一事實來源 A**：原始整理版，保留原作風格，**永不修改**，僅作追溯
 - `wiki/` = **單一事實來源 B**：跨來源精煉、去重、統一術語，是對外發佈內容
 
+## 遙測資料流（獨立於攻略內容流）
+
+```
+FH5 (UDP Data Out)
+     │
+     ▼
+scripts/forza_telemetry/recorder.py  ←─ start-telemetry.bat
+     │
+     ▼
+data/forza_telemetry/sessions/{ts}_carXXX_PIYYY/
+     ├── raw.csv      (60 Hz 原始遙測)
+     └── meta.json    (車輛/圈數/rewinds 統計)
+     │
+     ▼
+scripts/forza_telemetry/summarize.py  ←─ python -m scripts.forza_telemetry.summarize
+     │
+     ▼
+data/forza_telemetry/sessions/{...}/summary.md  (人類可讀的詳細報告)
+     │
+     ▼
+race-analyst skill  ←─ 使用者說「分析這場」
+     │ (Read summary + 比對 wiki/tuning/、wiki/driving/)
+     ▼
+data/forza_telemetry/sessions/{...}/analysis.md  (駕駛/調校建議)
+```
+
+詳細工具說明：[scripts/forza_telemetry/README.md](scripts/forza_telemetry/README.md)
+
 ## Skills 目錄
 
 | Skill | 用途 | 觸發時機 |
@@ -63,6 +100,7 @@ D:\Projects\Forza Horizon\
 | `wiki-integrator` | 把 `_sources/` 單份來源拆片段、分類、比對既有 wiki 產生整合計劃（NEW/MERGE/REVISE/DUP）後套用 | 使用者說「整合這份攻略」「精煉／去蕪存菁」「處理 _sources 裡還沒整合的」 |
 | `wiki-doc-writer` | 針對指定主題從全 `_sources/` 綜合撰寫 wiki 長文（跨多來源精煉） | 使用者說「寫一篇 XX 的 wiki 攻略」 |
 | `wiki-site-builder` | VitePress 網站骨架、側邊欄產生、GitHub Pages 部署 | 使用者說「建網站」「部署」「改側邊欄」 |
+| `race-analyst` | 讀取 `data/forza_telemetry/sessions/.../summary.md`，比對 wiki 知識，產出駕駛/調校建議到同層 `analysis.md` | 使用者說「分析這場賽事」「看一下這份 summary」「給我調校建議」「幫我看這場資料」 |
 
 ## 操作原則
 

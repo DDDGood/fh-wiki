@@ -19,3 +19,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Telemetry recordings (產生資料量大，且為個人測試紀錄)
+data/forza_telemetry/
+
+# Python
+__pycache__/
+*.pyc
