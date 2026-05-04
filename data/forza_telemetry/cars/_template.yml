@@ -1,0 +1,79 @@
+# 車輛資料範本
+# ────────────────────────────────────────────
+# 複製此檔為 {ordinal}.yml（例：1564.yml）並填入。
+# ordinal 從 session 資料夾名稱（car{N}_PI{N}）或 meta.json 的 car.ordinal 取得。
+#
+# 單位約定（檔案內不重複標註，遊戲內請設為這些單位）：
+#   tire pressure : psi
+#   spring rate   : kgf/mm
+#   ride height   : cm
+#   camber/toe    : 度
+#   caster        : 度
+#   aero          : 遊戲內顯示數值（kgf 或 lb，看遊戲設定）
+#   brakes / diff : 百分比（不寫 % 符號）
+#
+# 調校歷史以 git 為準：改了 tune → 改檔 → commit。
+# 各 session 的 meta.json 會凍結當時的快照，舊賽事不受未來 tune 改動影響。
+
+# ── 元資料 ─────────────────────────────────
+ordinal: 0000                  # ⚠ 改成實際 CarOrdinal
+name: 車廠 車型 年份             # 例：Subaru BRZ 2013
+manufacturer: 車廠
+model_year: 2013
+purpose: 軌跡                  # 軌跡 / 越野 / 漂移 / 通用
+drivetrain: RWD                # AWD / RWD / FWD（僅標籤用，session 會以 UDP 為準）
+class: A                       # X / S2 / S1 / A / B / C / D
+notes: |
+  自由文字。流派、改裝重點、駕駛感受、已知問題都寫這裡。
+
+# ── 改裝（選填，純文字）─────────────────────
+upgrades_notes: |
+  引擎、變速、輪胎、減重級別等。要列就列，不要逼自己列全。
+
+# ── 目前調校（單一物件，非陣列）──────────────
+# 用不到的欄位（例如 RWD 沒前差速器）整段刪掉，不要留 null。
+tune:
+  tires:
+    pressure_front: 22.0
+    pressure_rear: 22.0
+
+  gearing:
+    final_drive: 3.42
+    ratios: [3.10, 2.20, 1.65, 1.30, 1.05, 0.85]
+
+  alignment:
+    camber_front: -2.4
+    camber_rear: -1.5
+    toe_front: 0.0
+    toe_rear: 0.1
+    caster: 6.0
+
+  anti_roll_bars:
+    front: 1                   # 1 = 最軟
+    rear: 25
+
+  springs:
+    front: 720
+    rear: 680
+    ride_height_front: 11.0
+    ride_height_rear: 11.5
+
+  damping:
+    rebound_front: 9.5
+    rebound_rear: 8.0
+    bump_front: 4.5
+    bump_rear: 4.0
+
+  # 沒可調空力套件就刪掉整個 aero 區塊
+  aero:
+    front: 80
+    rear: 180
+
+  brakes:
+    balance: 52
+    pressure: 100
+
+  # 用不到的差速器欄位（例如 RWD 的 accel_front / decel_front / center）整個刪掉
+  differential:
+    accel_rear: 65
+    decel_rear: 20

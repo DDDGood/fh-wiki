@@ -1,0 +1,4 @@
+interface:
+  display_name: "Race Analyst"
+  short_description: "分析 FH5 遙測賽事資料"
+  default_prompt: "分析最新的 Forza Horizon 5 telemetry session，產出駕駛與調校建議。"

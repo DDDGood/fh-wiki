@@ -21,7 +21,10 @@ Thumbs.db
 *.log
 
 # Telemetry recordings (產生資料量大，且為個人測試紀錄)
-data/forza_telemetry/
+# 用 /* 而非整個資料夾，才能用 ! 重新納入子目錄（git 不會進入被忽略的資料夾）
+data/forza_telemetry/*
+# 車輛資料庫要進版控（git log 即調校演進史）
+!data/forza_telemetry/cars/
 
 # Python
 __pycache__/

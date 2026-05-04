@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import re
 import statistics
 import sys
 from collections import defaultdict
@@ -45,8 +44,60 @@ BRAKE_FULL_THRESHOLD = 250
 GEARSHIFT_IDEAL_PCT = 0.95           # ideal shift point as % of redline
 RPM_POWER_BAND_PCT = 0.80            # power band starts ~80% redline
 DECEL_EVENT_G = 0.5                  # > 0.5 G decel counts as braking event
-UNDERSTEER_RATIO = 1.5               # front slip angle > 1.5x rear = understeer
+UNDERSTEER_RATIO = 1.5               # legacy slip-angle 法閾值；目前不使用，留作 fallback
 DRIVETRAIN_NAMES = {0: "FWD", 1: "RWD", 2: "AWD"}
+
+# === US/OS 偵測：yaw-rate 法（取代舊的 slip-angle ratio 法）===
+# 業界標準（NHTSA、ESC 系統都用）：實際 yaw rate vs 物理預期 yaw rate
+#   expected_yaw = lateral_acceleration / speed   （rad/s，純運動學公式）
+# 與 PI 級／速度／車型無關，比舊的固定門檻更精準。
+#
+# **重要**：AngularVelocityY 才是 FH5 的 yaw rate（不是 Z）。實測 sustained turn
+# 中 AngVel_Y 與 AccelerationX 同號率 99.7%、ratio 中位數 1.012；AngVel_Z 同號率
+# 47% 是雜訊。Z 軸是 roll（繞前後軸的側翻）、X 軸是 pitch（繞左右軸的俯仰）。
+YAW_DETECTION_LAT_G_MIN = 0.4        # 進彎門檻（同 CORNER_ENTER_G）
+YAW_DETECTION_SPEED_MIN = 5.0        # m/s，避免低速分母過小
+YAW_DETECTION_BRAKE_MAX = 200        # < 200 才判定（過濾「煞車中 US 是正常」）
+# 嚴重度門檻（ratio = actual_yaw / expected_yaw）
+# 實測 ratio 分布：median 1.035，p5-p95 = 0.50-1.67，所以這個範圍算「正常 transient」。
+# severe 門檻設在 0.4 / 1.7（約 p3 / p97），確保只有真正脫節才觸發。
+YAW_US_SEVERE = 0.4                  # ratio < 0.4 → ⛔ 嚴重 US（車完全轉不過）
+YAW_US_MODERATE_ENTRY = 0.65         # entry phase 較寬鬆（turn-in transient）
+YAW_US_MODERATE_MIDEXIT = 0.70       # mid/exit 較嚴
+YAW_US_MILD = 0.82                   # ratio 0.82-1.20 視為平衡，外為 mild
+YAW_OS_SEVERE = 1.7
+YAW_OS_MODERATE_ENTRY = 1.40
+YAW_OS_MODERATE_MIDEXIT = 1.35
+YAW_OS_MILD = 1.20
+# Slip-angle 確認信號（FH5 normalized slip：>1 = grip lost）
+YAW_SLIP_CONFIRM_THRESHOLD = 0.7     # front/rear slip ≥ 0.7 表示胎接近 grip 極限
+
+# 缺陷 11：依 PI 級的橫向 G 力達標基準（對照 [wiki/upgrades/輪胎配件.md]
+# Mustuff124 提出的 build 健康度指標：選用適合的輪胎 + 減重等級，達到該 PI 級
+# 應有的橫向 G 力。低於下限 → 升輪胎或減重，先不要急著升馬力）
+PI_GRIP_TARGETS = [
+    # (PI 上限, 級距標籤, G 下限, G 上限)
+    (500,  "D",  None, None),  # D 級無 G 力基準（多數為慢車）
+    (600,  "C",  None, None),
+    (700,  "B",  1.3, 1.4),
+    (800,  "A",  1.7, 1.9),
+    (900,  "S1", 2.1, 2.3),
+    (998,  "S2", 2.5, None),
+    (999,  "X",  2.5, None),
+]
+
+# 缺陷 9：Launch 階段偵測（對應 [wiki/driving/RWD駕駛技巧.md] § Launch 找頂速法）
+# 起步 = 從 IsRaceOn=1 後首個 speed > 5 km/h 的封包開始，到 distance 達 LAUNCH_DISTANCE_M 為止
+LAUNCH_DISTANCE_M = 200              # 起步分析距離（前 200 m，多數車覆蓋 1-3 檔）
+LAUNCH_SLIP_LOSS_THRESHOLD = 1.0     # 後輪 slip ratio > 1.0 = 抓地丟失
+LAUNCH_GEAR3_SLIP_PCT = 0.30         # 三檔仍有 ≥ 30% packet 打滑 → 後胎抓地不夠
+
+# 缺陷 10：Exit phase「彎太多 + 加油太早」（對應 [wiki/driving/賽車線與彎道基礎.md]
+# 過 apex 後同時放鬆方向盤 + 加油 + 瞄外。常見錯：仍在大角度轉向就已踩半油以上）
+EXIT_HARD_STEER_RATIO = 0.5          # |Steer| / steer_max 仍 > 50% → 仍在大角度轉向
+EXIT_EARLY_THROTTLE = 128            # Accel >= 128 (半油以上) → 已進入加油
+EXIT_OVERTURN_MIN_PACKETS = 8        # 同一彎此症狀 ≥ 8 packet ≈ 0.13s 才算問題彎
+EXIT_OVERTURN_CORNER_PCT = 0.25      # session 內 ≥ 25% 彎為問題彎才觸發 finding
 
 # Corner detection — tuned empirically on G29 / AWD PI 700 sessions.
 CORNER_ENTER_G = 0.4                 # |lateral G| above this → in corner (hysteresis enter)
@@ -90,6 +141,112 @@ def speed_kmh(v):
 def integrate_distance(speeds, hz=60):
     """Integrate speed (m/s) over packets at given Hz to get distance (m)."""
     return sum(speeds) / hz
+
+
+def _rolling_avg(vals: list[float], i: int, window: int = 3) -> float:
+    """Centered rolling average，邊界用 clamp。用於平滑 yaw rate 等 transient 雜訊。"""
+    half = window // 2
+    lo, hi = max(0, i - half), min(len(vals), i + half + 1)
+    return sum(vals[lo:hi]) / (hi - lo)
+
+
+def _classify_yaw_balance(actual_yaw: float, lat_acc: float, speed: float,
+                          brake: int, phase: str
+                          ) -> tuple[str | None, str | None, float | None]:
+    """缺陷 (新)：yaw-rate-based US/OS 判定。
+
+    比較實際 yaw rate（AngularVelocityY，已平滑）與物理預期 yaw rate
+    （= lateral_acc / speed，純運動學）。
+
+    Args:
+        actual_yaw: AngularVelocityY 平滑後的值（rad/s，signed）
+        lat_acc: AccelerationX (m/s²，signed)
+        speed: m/s（必須正）
+        brake: Brake (0-255)
+        phase: 'entry' | 'apex' | 'exit'
+
+    Returns:
+        (kind, severity, ratio) where:
+            kind ∈ {'us', 'os', None}
+            severity ∈ {'mild', 'moderate', 'severe', None}
+            ratio = actual_yaw / expected_yaw（>0 才有意義）
+        若 packet 不符判定條件（速度過低/G 過低/煞車中/異號）回 (None, None, None)。
+    """
+    # 過濾條件
+    if speed < YAW_DETECTION_SPEED_MIN:
+        return (None, None, None)
+    if abs(lat_acc) < YAW_DETECTION_LAT_G_MIN * 9.81:
+        return (None, None, None)
+    if brake >= YAW_DETECTION_BRAKE_MAX:
+        # 煞車中 US 是正常的（wiki/tuning/三段彎道診斷.md）
+        return (None, None, None)
+    # Sign 必須同號（正常過彎，不是反打/drift）
+    if (lat_acc > 0) != (actual_yaw > 0):
+        return (None, None, None)
+
+    expected_yaw = lat_acc / speed
+    if abs(expected_yaw) < 0.01:  # 太小的 expected 容易產生不穩定 ratio
+        return (None, None, None)
+
+    ratio = actual_yaw / expected_yaw  # 同號 → ratio > 0
+
+    # phase-dependent moderate threshold
+    us_moderate = YAW_US_MODERATE_ENTRY if phase == 'entry' else YAW_US_MODERATE_MIDEXIT
+    os_moderate = YAW_OS_MODERATE_ENTRY if phase == 'entry' else YAW_OS_MODERATE_MIDEXIT
+
+    if ratio < YAW_US_SEVERE:
+        return ('us', 'severe', ratio)
+    if ratio < us_moderate:
+        return ('us', 'moderate', ratio)
+    if ratio < YAW_US_MILD:
+        return ('us', 'mild', ratio)
+    if ratio > YAW_OS_SEVERE:
+        return ('os', 'severe', ratio)
+    if ratio > os_moderate:
+        return ('os', 'moderate', ratio)
+    if ratio > YAW_OS_MILD:
+        return ('os', 'mild', ratio)
+    return (None, None, ratio)  # balanced
+
+
+def dedupe_attempts(rows: list) -> tuple[list, int]:
+    """Rewind-aware filter：對每個 CRT 時刻只保留**錄製時間最晚**的 packet。
+
+    過去的 `is_rewind=='0'` 過濾正好搞反——它**保留**了 rewind 前的失敗嘗試、
+    **丟棄**了 redo 段（玩家最終選擇的線）。本函式用 CRT-bucket 取最晚 arrival
+    一勞永逸：
+
+    - 對每個 1/60 秒 CRT 桶（packet 級解析度），多個嘗試中只保留 arrival 最大者
+    - 不論玩家在同一段 rewind 幾次（例：彎 X 倒轉 4 次直到第 5 次成功），最終
+      只保留第 5 次成功的資料
+    - 跨彎 rewind（例：玩家倒轉到彎 X 之後重做彎 Y）也自然處理——每個 CRT 桶
+      獨立判定，沒被重做的段落維持原樣
+    - 輸出依 CRT 排序，確保下游分析的「1 packet = 1/60s」假設仍成立
+
+    僅處理 IsRaceOn=1 的 packet（rewind 動畫期 IsRaceOn=0 自動排除）。
+    回傳 (filtered_rows, n_superseded)。
+    """
+    bucket_to_idx: dict[int, int] = {}
+    for i, r in enumerate(rows):
+        if r['IsRaceOn'] != '1':
+            continue
+        try:
+            crt = float(r.get('CurrentRaceTime', 0))
+        except (TypeError, ValueError):
+            continue
+        if crt < 0:
+            continue
+        # 1/60 秒桶；後寫入會覆蓋前寫入（latest arrival wins）
+        bucket = int(crt * 60)
+        bucket_to_idx[bucket] = i
+
+    # 依 CRT 桶排序輸出（= 賽事時間順序），保持「相鄰 packet 差 1/60 秒」假設
+    sorted_buckets = sorted(bucket_to_idx.keys())
+    filtered = [rows[bucket_to_idx[b]] for b in sorted_buckets]
+
+    total_race_on = sum(1 for r in rows if r['IsRaceOn'] == '1')
+    n_superseded = total_race_on - len(filtered)
+    return filtered, n_superseded
 
 
 # ----- segmentation ----------------------------------------------------------
@@ -180,17 +337,19 @@ def analyze_tires(segments: list[Segment]) -> dict:
 
 
 def analyze_slip(segments: list[Segment]) -> dict:
-    """Slip ratio + slip angle patterns. Distinguishes understeer vs oversteer.
+    """Slip ratio 統計（per-segment 最大／平均）。
 
     過濾規則：slip ratio > SLIP_RATIO_ARTIFACT_CAP（=5.0）視為撞車/rewind 邊界 artifact，
     從 fr_max/rr_max 統計中剔除（FH5 物理上輪胎打滑率 5 已經是極端輪轉空轉，11 之類純為 IMU 尖峰）。
-    若該 segment 任一輪有此尖峰，per-segment dict 多帶 ``ratio_artifact_filtered=True`` 旗標供格式化端標註。
 
-    推頭/轉向過度 top 表使用 slip angle（非 ratio），但對 angle 同樣加 < 5 過濾，
-    避免少數異常 packet 把整張表都洗掉。
+    **歷史**：本函式原本也輸出基於 slip angle 的 understeer / oversteer top moments
+    （`understeer_top` / `oversteer_top` / `understeer_count` / `oversteer_count`），
+    但該邏輯（front > 1.5× rear AND > 0.5）會把正常過彎的 turn-in 誤判為推頭
+    （實測 78% false positive）。已改用 `analyze_corners` 內的 yaw-rate-based 法
+    （見 `_classify_yaw_balance`），US/OS top moments 從 corners 的 `top_imbalance`
+    彙總取得。
     """
     SLIP_RATIO_ARTIFACT_CAP = 5.0
-    SLIP_ANGLE_ARTIFACT_CAP = 5.0
     rows = []
     for seg in segments:
         fr_samples = [(abs(F(r, 'TireSlipRatioFrontLeft')) +
@@ -208,44 +367,36 @@ def analyze_slip(segments: list[Segment]) -> dict:
         rows.append({"label": seg.label, "fr_max": fr_max, "rr_max": rr_max,
                     "fr_avg": fr_avg, "rr_avg": rr_avg,
                     "ratio_artifact_filtered": artifact})
-    # Understeer / oversteer moments (using slip angle, not ratio)
-    understeer = []
-    oversteer = []
-    for seg in segments:
-        for r in seg.packets:
-            fs = (abs(F(r, 'TireSlipAngleFrontLeft')) +
-                  abs(F(r, 'TireSlipAngleFrontRight'))) / 2
-            rs = (abs(F(r, 'TireSlipAngleRearLeft')) +
-                  abs(F(r, 'TireSlipAngleRearRight'))) / 2
-            # 過濾 slip angle artifact（撞車/rewind 邊界尖峰）
-            if fs >= SLIP_ANGLE_ARTIFACT_CAP or rs >= SLIP_ANGLE_ARTIFACT_CAP:
-                continue
-            if fs > 0.5 and fs > rs * UNDERSTEER_RATIO:
-                understeer.append((F(r, 'CurrentRaceTime'), seg.label,
-                                  fs, rs, F(r, 'Speed') * 3.6))
-            elif rs > 0.5 and rs > fs * UNDERSTEER_RATIO:
-                oversteer.append((F(r, 'CurrentRaceTime'), seg.label,
-                                 fs, rs, F(r, 'Speed') * 3.6))
-    understeer.sort(key=lambda x: -x[2])
-    oversteer.sort(key=lambda x: -x[3])
-    return {"per_segment": rows, "understeer_top": understeer[:5],
-            "oversteer_top": oversteer[:5],
-            "understeer_count": len(understeer),
-            "oversteer_count": len(oversteer)}
+    return {"per_segment": rows}
 
 
 def analyze_suspension(segments: list[Segment]) -> dict:
+    """Per-corner suspension stats.
+
+    - max/avg/bottom_count: existing bottoming check.
+    - std: NormalizedSuspensionTravel oscillation amplitude. High std on a
+      relatively flat track ≈ visual 「波動幅度大」 in the in-game telemetry
+      bar → spring on that corner is too soft. Low std + low avg → spring
+      too stiff (travel unused).
+    - in_15_85_pct / in_20_80_pct: % of packets where the corner stays inside
+      the wiki's healthy ranges (硬核指南: 15-85%, HokiHoshi: 20-80%).
+    """
     rows = []
     total_bottom = 0
     for seg in segments:
-        fl_max = max(F(r, 'NormalizedSuspensionTravelFrontLeft') for r in seg.packets)
-        fr_max = max(F(r, 'NormalizedSuspensionTravelFrontRight') for r in seg.packets)
-        rl_max = max(F(r, 'NormalizedSuspensionTravelRearLeft') for r in seg.packets)
-        rr_max = max(F(r, 'NormalizedSuspensionTravelRearRight') for r in seg.packets)
-        fl_avg = statistics.mean(F(r, 'NormalizedSuspensionTravelFrontLeft') for r in seg.packets)
-        fr_avg = statistics.mean(F(r, 'NormalizedSuspensionTravelFrontRight') for r in seg.packets)
-        rl_avg = statistics.mean(F(r, 'NormalizedSuspensionTravelRearLeft') for r in seg.packets)
-        rr_avg = statistics.mean(F(r, 'NormalizedSuspensionTravelRearRight') for r in seg.packets)
+        fl_vals = [F(r, 'NormalizedSuspensionTravelFrontLeft') for r in seg.packets]
+        fr_vals = [F(r, 'NormalizedSuspensionTravelFrontRight') for r in seg.packets]
+        rl_vals = [F(r, 'NormalizedSuspensionTravelRearLeft') for r in seg.packets]
+        rr_vals = [F(r, 'NormalizedSuspensionTravelRearRight') for r in seg.packets]
+        n = len(seg.packets)
+        if n == 0:
+            continue
+
+        def pct_in_range(vals, lo, hi):
+            return sum(1 for v in vals if lo <= v <= hi) / len(vals) * 100
+
+        std = lambda vs: statistics.pstdev(vs) if len(vs) > 1 else 0.0
+
         bottom = sum(1 for r in seg.packets if max(
             F(r, 'NormalizedSuspensionTravelFrontLeft'),
             F(r, 'NormalizedSuspensionTravelFrontRight'),
@@ -253,10 +404,65 @@ def analyze_suspension(segments: list[Segment]) -> dict:
             F(r, 'NormalizedSuspensionTravelRearRight')) > SUSPENSION_BOTTOM_THRESHOLD)
         total_bottom += bottom
         rows.append({"label": seg.label,
-                    "fl_max": fl_max, "fr_max": fr_max, "rl_max": rl_max, "rr_max": rr_max,
-                    "fl_avg": fl_avg, "fr_avg": fr_avg, "rl_avg": rl_avg, "rr_avg": rr_avg,
+                    "fl_max": max(fl_vals), "fr_max": max(fr_vals),
+                    "rl_max": max(rl_vals), "rr_max": max(rr_vals),
+                    "fl_avg": statistics.mean(fl_vals), "fr_avg": statistics.mean(fr_vals),
+                    "rl_avg": statistics.mean(rl_vals), "rr_avg": statistics.mean(rr_vals),
+                    "fl_std": std(fl_vals), "fr_std": std(fr_vals),
+                    "rl_std": std(rl_vals), "rr_std": std(rr_vals),
+                    "fl_in_15_85": pct_in_range(fl_vals, 0.15, 0.85),
+                    "fr_in_15_85": pct_in_range(fr_vals, 0.15, 0.85),
+                    "rl_in_15_85": pct_in_range(rl_vals, 0.15, 0.85),
+                    "rr_in_15_85": pct_in_range(rr_vals, 0.15, 0.85),
+                    "fl_in_20_80": pct_in_range(fl_vals, 0.20, 0.80),
+                    "fr_in_20_80": pct_in_range(fr_vals, 0.20, 0.80),
+                    "rl_in_20_80": pct_in_range(rl_vals, 0.20, 0.80),
+                    "rr_in_20_80": pct_in_range(rr_vals, 0.20, 0.80),
                     "bottom_count": bottom})
     return {"per_segment": rows, "total_bottom_packets": total_bottom}
+
+
+def analyze_brake_balance(valid_rows: list) -> dict:
+    """缺陷 4：煞車期間前後軸鎖死分布 → 煞車平衡診斷。
+
+    煞車調校.md：偏前 → 增轉向過度（前輪鎖死多）；偏後 → 減轉向（後輪鎖死多）。
+    在 Brake > 200 的 packet 中，若前輪 slip ratio > 1.0 → 前鎖死；後輪同理。
+    比例顯著偏一邊 → 滑桿應反方向調整。
+    """
+    BRAKING_THR = 200       # Brake (0-255) > 200 視為實質減速
+    LOCKUP_THR = 1.0        # |TireSlipRatio| > 1.0 = 失抓 / 鎖死
+    braking = 0
+    front_lock = 0
+    rear_lock = 0
+    both_lock = 0
+    for r in valid_rows:
+        if I(r, 'Brake') < BRAKING_THR:
+            continue
+        braking += 1
+        fl = abs(F(r, 'TireSlipRatioFrontLeft'))
+        fr = abs(F(r, 'TireSlipRatioFrontRight'))
+        rl = abs(F(r, 'TireSlipRatioRearLeft'))
+        rr = abs(F(r, 'TireSlipRatioRearRight'))
+        f_locked = fl > LOCKUP_THR or fr > LOCKUP_THR
+        r_locked = rl > LOCKUP_THR or rr > LOCKUP_THR
+        if f_locked and r_locked:
+            both_lock += 1
+        elif f_locked:
+            front_lock += 1
+        elif r_locked:
+            rear_lock += 1
+    f_total = front_lock + both_lock
+    r_total = rear_lock + both_lock
+    return {
+        "braking_packets": braking,
+        "front_lockup_packets": f_total,
+        "rear_lockup_packets": r_total,
+        "front_only_packets": front_lock,
+        "rear_only_packets": rear_lock,
+        "both_packets": both_lock,
+        # ratio: > 1 偏前鎖死多, < 1 偏後鎖死多
+        "front_rear_ratio": (f_total / r_total) if r_total > 0 else (float('inf') if f_total > 0 else 0.0),
+    }
 
 
 def analyze_rpm_observed(valid_rows: list) -> dict:
@@ -369,9 +575,15 @@ def analyze_drivetrain(valid_rows: list, dyno: dict | None = None) -> dict:
         ideal_shift_basis = "engine_max_x_0.95"
 
     shift_pts = defaultdict(list)
+    # 缺陷 8：upshift 後落點分析（齒比.md：理想是換完檔仍在 power band 內）
+    # 落點取換檔後 12 packet (≈0.2s) 的 RPM——讓引擎轉速穩定後再看。
+    POST_SHIFT_LOOKAHEAD = 12
+    post_shift_landings = []  # 每個 upshift 落在哪個 RPM
     for j in range(1, len(valid_rows)):
         if gears[j] > gears[j - 1] and gears[j - 1] > 0:
             shift_pts[(gears[j - 1], gears[j])].append(rpms[j - 1])
+            land_idx = min(j + POST_SHIFT_LOOKAHEAD, len(valid_rows) - 1)
+            post_shift_landings.append(rpms[land_idx])
 
     # 動力區：若有 dyno，用 power >= peak_power × 90%；否則退回 RPM 法
     if dyno is not None:
@@ -407,6 +619,16 @@ def analyze_drivetrain(valid_rows: list, dyno: dict | None = None) -> dict:
 
     all_shifts = [r for pts in shift_pts.values() for r in pts]
     avg_shift = statistics.mean(all_shifts) if all_shifts else 0
+
+    # 缺陷 8：post-shift dead zone — 換完檔後 RPM 是否掉出 power band
+    if post_shift_landings:
+        below_band = sum(1 for r in post_shift_landings if r < power_band_start)
+        post_shift_dead_pct = below_band / len(post_shift_landings) * 100
+        post_shift_avg = statistics.mean(post_shift_landings)
+    else:
+        post_shift_dead_pct = 0.0
+        post_shift_avg = 0.0
+
     return {"engine_max": engine_max, "ideal_shift": ideal_shift,
             "ideal_shift_basis": ideal_shift_basis,
             "power_band_start": power_band_start,
@@ -417,7 +639,10 @@ def analyze_drivetrain(valid_rows: list, dyno: dict | None = None) -> dict:
             "in_power_band_pct": in_power_band,
             "in_redline_pct": in_redline,
             "gear_distribution": dict(sorted(gear_pct.items())),
-            "max_rpm_seen": max(rpms)}
+            "max_rpm_seen": max(rpms),
+            "post_shift_count": len(post_shift_landings),
+            "post_shift_dead_pct": post_shift_dead_pct,
+            "post_shift_avg_rpm": post_shift_avg}
 
 
 def analyze_inputs(valid_rows: list) -> dict:
@@ -632,6 +857,69 @@ def analyze_g_forces(valid_rows: list, pre_crash_rows: list | None = None) -> di
     return out
 
 
+def analyze_pi_grip_target(gforces: dict, meta: dict, corners: dict) -> dict | None:
+    """缺陷 11：依 PI 級的橫向 G 力達標檢查。
+
+    對照 [wiki/upgrades/輪胎配件.md] Mustuff124 表：
+        B 1.3-1.4 / A 1.7-1.9 / S1 2.1-2.3 / S2 2.5+
+
+    **量測值**：用 corners.max_peak_g（彎內最大側向 G，已被 CORNER_LATERAL_G_CAP=3.5
+    過濾且來自偵測到的彎，避免微撞擊／IMU 尖峰污染）。若沒有偵測到的彎則 fallback
+    到 gforces.max_lateral_g_clean，但會在輸出標註資料來源不可靠。
+
+    回傳 dict 含級距、目標範圍、實測值、資料源、達標狀態與 gap；若 PI 級無基準（D/C）
+    亦回完整 dict（status="no_target"）讓輸出端統一判斷。
+    """
+    pi = meta.get("car", {}).get("performance_index")
+    if pi is None:
+        return None
+    label, lo, hi = None, None, None
+    for cap, lbl, l, h in PI_GRIP_TARGETS:
+        if pi <= cap:
+            label, lo, hi = lbl, l, h
+            break
+
+    # 量測穩健化：用「top-3 corner peaks 平均」而非單一 max（單一彎可能因
+    # 微撞擊或 IMU 抖動觸 CORNER_LATERAL_G_CAP=3.5 上限）。代表「車能穩定發揮的
+    # 側向 G 上限」，比 max_peak_g 更貼近 build 能力。彎數 < 3 時 fallback 到 max。
+    # 同時保留 avg_peak_g 作為次要參考（所有彎平均，反映「常態 grip 使用率」）。
+    corner_list = corners.get("corners", []) if corners.get("count", 0) > 0 else []
+    avg_peak = corners.get("avg_peak_g")
+    if len(corner_list) >= 3:
+        peaks = sorted((abs(c["peak_g"]) for c in corner_list), reverse=True)
+        observed = sum(peaks[:3]) / 3
+        source = "corners_top3"
+    elif corner_list:
+        observed = max(abs(c["peak_g"]) for c in corner_list)
+        source = "corners_max"
+    else:
+        observed = gforces["max_lateral_g_clean"]
+        source = "raw"
+
+    if lo is None:  # D / C 級無基準
+        return {"pi": pi, "class_label": label, "expected_lo": None,
+                "expected_hi": None, "observed": observed, "source": source,
+                "avg_peak": avg_peak, "status": "no_target", "gap": 0.0}
+
+    # status 判定：
+    #   under = 低於下限（建議升輪胎/減重）
+    #   target = 落在範圍內（達標）
+    #   over = 高於上限（build 操控過剩，可考慮減重→換更激進取向）
+    #   over 在 hi=None（S2/X 無上限）時不會觸發
+    if observed < lo:
+        status = "under"
+        gap = lo - observed
+    elif hi is not None and observed > hi:
+        status = "over"
+        gap = observed - hi
+    else:
+        status = "target"
+        gap = 0.0
+    return {"pi": pi, "class_label": label, "expected_lo": lo,
+            "expected_hi": hi, "observed": observed, "source": source,
+            "avg_peak": avg_peak, "status": status, "gap": gap}
+
+
 def analyze_decel_events(valid_rows: list) -> list:
     """Estimate where heavy braking happens (compensates for missing brake input)."""
     out = []
@@ -650,6 +938,103 @@ def analyze_decel_events(valid_rows: list) -> list:
     return out
 
 
+def analyze_launch(valid_rows: list, drivetrain_type: int) -> dict | None:
+    """缺陷 9：起步 launch 階段後輪 slip ratio 分析。
+
+    對應 [wiki/driving/RWD駕駛技巧.md] § Launch 找頂速法：
+    - 起步全油門是最快的，但要在頂速前一刻升檔
+    - **三檔仍打滑** → 後胎抓地不夠（不是駕駛問題）
+
+    流程：
+      1. 從第一個 packet 開始找「靜止 → 加速」的真實起步點
+      2. 從起步點往前累積到 LAUNCH_DISTANCE_M（200 m）
+      3. 依 gear (1/2/3) 統計後輪平均 slip ratio 與打滑 packet 比例
+      4. 若 gear 3 仍 ≥ 30% packet 打滑 → 標記為 build 問題
+
+    僅 RWD/AWD（drivetrain_type ∈ {1, 2}）有意義；FWD 回 None。
+    若找不到合格的 launch 段（玩家可能從中段插入錄製）也回 None。
+    """
+    if drivetrain_type not in (1, 2):
+        return None
+    if len(valid_rows) < 60:
+        return None
+
+    # 找起步點：第一個 speed < 2 m/s 後緊接著 speed 持續上升的點
+    # （避免抓到「停下來再加速」的中段事件——只取從錄製開始的首個起步）
+    start_idx = None
+    for j in range(min(len(valid_rows) - 30, 600)):  # 只在前 10 秒內找
+        if F(valid_rows[j], 'Speed') < 2.0:
+            # 看後續 30 packet 是否持續加速到 > 5 m/s
+            ahead_max = max(F(valid_rows[k], 'Speed')
+                            for k in range(j, min(j + 30, len(valid_rows))))
+            if ahead_max > 5.0:
+                start_idx = j
+                break
+    if start_idx is None:
+        return None
+
+    # 從 start_idx 往前累積到達 LAUNCH_DISTANCE_M 為止
+    accum_m = 0.0
+    end_idx = start_idx
+    for j in range(start_idx, len(valid_rows) - 1):
+        accum_m += F(valid_rows[j], 'Speed') / 60  # m/s × 1/60 s = m
+        end_idx = j
+        if accum_m >= LAUNCH_DISTANCE_M:
+            break
+
+    launch_rows = valid_rows[start_idx:end_idx + 1]
+    if len(launch_rows) < 30:  # 不足 0.5s 的 launch 不分析
+        return None
+
+    # 依 gear 分組
+    by_gear: dict[int, dict] = {}
+    for r in launch_rows:
+        g = I(r, 'Gear')
+        if g <= 0 or g > 8:
+            continue
+        rear_slip = (abs(F(r, 'TireSlipRatioRearLeft'))
+                     + abs(F(r, 'TireSlipRatioRearRight'))) / 2
+        accel = I(r, 'Accel')
+        d = by_gear.setdefault(g, {"packets": 0, "slip_total": 0.0,
+                                    "loss_packets": 0, "wot_packets": 0,
+                                    "max_slip": 0.0})
+        d["packets"] += 1
+        d["slip_total"] += rear_slip
+        if rear_slip > LAUNCH_SLIP_LOSS_THRESHOLD:
+            d["loss_packets"] += 1
+        if accel >= THROTTLE_FULL_THRESHOLD:
+            d["wot_packets"] += 1
+        if rear_slip > d["max_slip"]:
+            d["max_slip"] = rear_slip
+
+    per_gear = []
+    gear3_problem = False
+    for g in sorted(by_gear.keys()):
+        d = by_gear[g]
+        loss_pct = d["loss_packets"] / d["packets"] if d["packets"] > 0 else 0.0
+        wot_pct = d["wot_packets"] / d["packets"] if d["packets"] > 0 else 0.0
+        per_gear.append({
+            "gear": g,
+            "packets": d["packets"],
+            "avg_slip": d["slip_total"] / d["packets"] if d["packets"] > 0 else 0.0,
+            "max_slip": d["max_slip"],
+            "loss_pct": loss_pct * 100,
+            "wot_pct": wot_pct * 100,
+        })
+        # gear 3 才檢查（gear 1-2 打滑是正常的）
+        if g >= 3 and d["packets"] >= 30 and loss_pct >= LAUNCH_GEAR3_SLIP_PCT:
+            gear3_problem = True
+
+    return {
+        "start_packet": start_idx,
+        "distance_m": accum_m,
+        "duration_s": len(launch_rows) / 60,
+        "per_gear": per_gear,
+        "gear3_problem": gear3_problem,
+        "drivetrain": drivetrain_type,
+    }
+
+
 def analyze_speed(valid_rows: list) -> dict:
     speeds = [F(r, 'Speed') * 3.6 for r in valid_rows]  # km/h
     return {"max_kmh": max(speeds),
@@ -666,9 +1051,77 @@ def analyze_surface(valid_rows: list) -> dict:
                         F(r, 'WheelInPuddleDepthFrontRight'),
                         F(r, 'WheelInPuddleDepthRearLeft'),
                         F(r, 'WheelInPuddleDepthRearRight')) for r in valid_rows)
+    # 缺陷 B2：路面類型分類 — 用 SurfaceRumble 平均強度 + 水深 + 觸縐石比例推測
+    # 公路 / 拉力（混合）/ 越野，套用對應的 wiki 修正表（公路調校修正表.md / 越野調校修正表.md）
+    rumble_avgs = [(F(r, 'SurfaceRumbleFrontLeft') +
+                    F(r, 'SurfaceRumbleFrontRight') +
+                    F(r, 'SurfaceRumbleRearLeft') +
+                    F(r, 'SurfaceRumbleRearRight')) / 4 for r in valid_rows]
+    avg_surface_rumble = statistics.mean(rumble_avgs) if rumble_avgs else 0.0
+    avg_puddle = statistics.mean([
+        max(F(r, 'WheelInPuddleDepthFrontLeft'),
+            F(r, 'WheelInPuddleDepthFrontRight'),
+            F(r, 'WheelInPuddleDepthRearLeft'),
+            F(r, 'WheelInPuddleDepthRearRight')) for r in valid_rows
+    ]) if valid_rows else 0.0
+    rumble_strip_pct = rumble_strip_events / len(valid_rows) * 100 if valid_rows else 0.0
+    # Heuristic 門檻（粗估，待實測校準）：
+    # 公路（純柏油）：avg_surface_rumble < 0.10 且 avg_puddle < 0.02
+    # 越野（土路 / 沙）：avg_surface_rumble >= 0.30 或 avg_puddle >= 0.10
+    # 拉力（混合）：介於兩者
+    if avg_surface_rumble >= 0.30 or avg_puddle >= 0.10:
+        surface_type = "offroad"
+    elif avg_surface_rumble >= 0.10 or avg_puddle >= 0.02:
+        surface_type = "rally"
+    else:
+        surface_type = "road"
     return {"rumble_strip_packets": rumble_strip_events,
             "rumble_strip_seconds": rumble_strip_events / 60,
-            "max_puddle_depth": max_puddle}
+            "max_puddle_depth": max_puddle,
+            "avg_surface_rumble": avg_surface_rumble,
+            "avg_puddle_depth": avg_puddle,
+            "rumble_strip_pct": rumble_strip_pct,
+            "surface_type": surface_type}
+
+
+def analyze_aero(valid_rows: list) -> dict:
+    """缺陷 B1：下壓力（aero）診斷 — 比較不同速度區間的側向 G 上限。
+
+    若高速段（> 200 km/h）累積 > 5s 且側向 G 上限明顯低於中速段（100-200 km/h）
+    上限的 60%，提示「下壓力可能不足」（也可能是高速彎駕駛偏保守，需與駕駛建議
+    並列、不下死論）。
+
+    對應 wiki/tuning/下壓力.md。
+    """
+    low, mid, high = [], [], []
+    for r in valid_rows:
+        kmh = F(r, 'Speed') * 3.6
+        # Cap 同 CORNER_LATERAL_G_CAP（FH5 物理極限 ~3G，> 5G 為 IMU 撞牆殘留尖峰）
+        lat_g = min(abs(F(r, 'AccelerationX') / 9.81), CORNER_LATERAL_G_CAP)
+        if kmh < 100:
+            low.append(lat_g)
+        elif kmh < 200:
+            mid.append(lat_g)
+        else:
+            high.append(lat_g)
+
+    def p95(vals):
+        if not vals:
+            return None
+        s = sorted(vals)
+        return s[min(len(s) - 1, int(len(s) * 0.95))]
+
+    low_p95 = p95(low)
+    mid_p95 = p95(mid)
+    high_p95 = p95(high)
+    return {
+        "low_packets": len(low),
+        "mid_packets": len(mid),
+        "high_packets": len(high),
+        "low_p95_lat_g": low_p95,
+        "mid_p95_lat_g": mid_p95,
+        "high_p95_lat_g": high_p95,
+    }
 
 
 def analyze_wheelspin(valid_rows: list) -> dict:
@@ -847,7 +1300,29 @@ def analyze_corners(valid_rows: list) -> dict:
                      abs(F(r, 'TireSlipAngleRearRight'))) / 2 for r in in_corner_pkts]
         rear_slip_ratio = [(abs(F(r, 'TireSlipRatioRearLeft')) +
                            abs(F(r, 'TireSlipRatioRearRight'))) / 2 for r in in_corner_pkts]
+        # Per-tire slip ratios kept separately for left-right delta (diff lock validation).
+        rl_slip_ratio = [F(r, 'TireSlipRatioRearLeft') for r in in_corner_pkts]
+        rr_slip_ratio = [F(r, 'TireSlipRatioRearRight') for r in in_corner_pkts]
+        fl_slip_ratio = [F(r, 'TireSlipRatioFrontLeft') for r in in_corner_pkts]
+        fr_slip_ratio = [F(r, 'TireSlipRatioFrontRight') for r in in_corner_pkts]
+        # 懸吊行程（缺陷 2：d/dt 分析）+ rumble strip flag（缺陷 3：過 curb）
+        front_susp_avg = [(F(r, 'NormalizedSuspensionTravelFrontLeft') +
+                           F(r, 'NormalizedSuspensionTravelFrontRight')) / 2 for r in in_corner_pkts]
+        rear_susp_avg = [(F(r, 'NormalizedSuspensionTravelRearLeft') +
+                          F(r, 'NormalizedSuspensionTravelRearRight')) / 2 for r in in_corner_pkts]
+        rumble_any = [(I(r, 'WheelOnRumbleStripFrontLeft') |
+                       I(r, 'WheelOnRumbleStripFrontRight') |
+                       I(r, 'WheelOnRumbleStripRearLeft') |
+                       I(r, 'WheelOnRumbleStripRearRight')) > 0 for r in in_corner_pkts]
+        ang_vel_z = [F(r, 'AngularVelocityZ') for r in in_corner_pkts]
+        # AngularVelocityY 才是 yaw rate（實證 99.7% sign match w/ AccelerationX；
+        # AngVel_Z 47% 是 roll、AngVel_X 是 pitch）。Z/X 仍保留供既有檢測使用。
+        ang_vel_y = [F(r, 'AngularVelocityY') for r in in_corner_pkts]
+        # signed lateral acc (m/s²)，用於 yaw-rate 法的 expected yaw 計算
+        lat_acc_signed = [F(r, 'AccelerationX') for r in in_corner_pkts]
+        brake = [I(r, 'Brake') for r in in_corner_pkts]
         throttle = [I(r, 'Accel') for r in in_corner_pkts]
+        steer = [I(r, 'Steer') for r in in_corner_pkts]
 
         # Find the apex packet (slowest point in the corner)
         apex_local_idx = speeds.index(min(speeds))
@@ -885,18 +1360,176 @@ def analyze_corners(valid_rows: list) -> dict:
         # Per-packet 推頭/轉向過度計數（彎內每 packet 比較 front/rear slip angle）
         # 對應 TL;DR「整體推頭傾向」與「過彎時間中推頭時間佔比」指標。
         # 5.0 上限同 analyze_slip 的 SLIP_ANGLE_ARTIFACT_CAP，過濾撞車尖峰。
+        #
+        # 三段切片（缺陷 0）：對照 wiki/tuning/三段彎道診斷.md，入彎/中段/出彎
+        # 各有不同處方。phase boundary 與 _emit_corner_table 一致：
+        #   entry  = [0, apex_local_idx)
+        #   apex   = [apex_local_idx, apex_phase_end_local]
+        #   exit   = (apex_phase_end_local, len-1]
+        APEX_WIN_LOCAL = 4
+        apex_phase_end_local = min(apex_local_idx + APEX_WIN_LOCAL, len(in_corner_pkts) - 1)
+
+        def _phase_of(local_i: int) -> str:
+            if local_i < apex_local_idx:
+                return 'entry'
+            if local_i <= apex_phase_end_local:
+                return 'apex'
+            return 'exit'
+
+        # === Yaw-rate-based US/OS 偵測（取代舊的 slip-angle ratio 法）===
+        # 業界 ESC 標準：實際 yaw 與物理預期 yaw（lat_acc/speed）的偏差。
+        # Slip angle 作為次級確認信號（>= 0.7 視為胎接近 grip 極限）。
+        phase_us = {'entry': 0, 'apex': 0, 'exit': 0}
+        phase_os = {'entry': 0, 'apex': 0, 'exit': 0}
+        phase_pkts = {'entry': 0, 'apex': 0, 'exit': 0}
         pkt_understeer = 0
         pkt_oversteer = 0
-        for fs_v, rs_v in zip(front_slip, rear_slip):
-            if fs_v >= 5.0 or rs_v >= 5.0:
+        pkt_us_severe = 0
+        pkt_os_severe = 0
+        pkt_us_moderate = 0
+        pkt_os_moderate = 0
+        pkt_us_confirmed = 0  # yaw 法 + slip angle ≥ 0.7
+        pkt_os_confirmed = 0
+        # Top-N imbalance packets（給報表「最異常瞬間」表用）
+        local_imbalance: list[tuple[float, int, str, str, float, float]] = []
+        for li in range(len(in_corner_pkts)):
+            ph = _phase_of(li)
+            phase_pkts[ph] += 1
+            yaw_smooth = _rolling_avg(ang_vel_y, li, 3)
+            kind, sev, ratio = _classify_yaw_balance(
+                yaw_smooth, lat_acc_signed[li], speeds[li], brake[li], ph)
+            if kind is None:
                 continue
-            if fs_v > 0.5 and fs_v > rs_v * UNDERSTEER_RATIO:
+            fs_v = front_slip[li]
+            rs_v = rear_slip[li]
+            if kind == 'us':
                 pkt_understeer += 1
-            elif rs_v > 0.5 and rs_v > fs_v * UNDERSTEER_RATIO:
+                phase_us[ph] += 1
+                if sev == 'severe':
+                    pkt_us_severe += 1
+                if sev in ('moderate', 'severe'):
+                    pkt_us_moderate += 1
+                if fs_v >= YAW_SLIP_CONFIRM_THRESHOLD:
+                    pkt_us_confirmed += 1
+            else:  # 'os'
                 pkt_oversteer += 1
+                phase_os[ph] += 1
+                if sev == 'severe':
+                    pkt_os_severe += 1
+                if sev in ('moderate', 'severe'):
+                    pkt_os_moderate += 1
+                if rs_v >= YAW_SLIP_CONFIRM_THRESHOLD:
+                    pkt_os_confirmed += 1
+            # 追蹤該彎內最異常的 5 個 packet（依與 1.0 的距離）
+            local_imbalance.append((abs(1.0 - ratio), li, kind, sev, ratio, fs_v if kind == 'us' else rs_v))
+        local_imbalance.sort(reverse=True)
+        top_imbalance = local_imbalance[:5]
         total_in_corner_packets += len(in_corner_pkts)
         understeer_packets_in_corners += pkt_understeer
         oversteer_packets_in_corners += pkt_oversteer
+
+        # 缺陷 1：左右輪 slip ratio Δ — 差速器鎖定驗證（差速器.md:147-174）
+        # 入彎（煞車中）取後輪左右 Δ → 後 diff decel 鬆緊
+        # 出彎（油門打開）取後輪 / 前輪左右 Δ → 後/前 diff accel 鬆緊
+        def _abs_lr_delta(left_vals, right_vals, l_start, l_end):
+            """|left - right| per packet, max over phase. AWD/RWD 出彎時常常一輪
+            spin、另一輪有抓地力 → 差距大；diff lock 越鬆差距越大。"""
+            if l_start >= l_end:
+                return 0.0
+            best = 0.0
+            for k in range(l_start, l_end):
+                d = abs(abs(left_vals[k]) - abs(right_vals[k]))
+                if d > best:
+                    best = d
+            return best
+
+        entry_lr_rear_delta = _abs_lr_delta(rl_slip_ratio, rr_slip_ratio, 0, apex_local_idx)
+        exit_lr_rear_delta = _abs_lr_delta(rl_slip_ratio, rr_slip_ratio,
+                                            apex_phase_end_local + 1, len(in_corner_pkts))
+        exit_lr_front_delta = _abs_lr_delta(fl_slip_ratio, fr_slip_ratio,
+                                             apex_phase_end_local + 1, len(in_corner_pkts))
+
+        # === 缺陷 2：懸吊行程 d/dt（壓縮/回彈速度，1 packet = 1/60 s）===
+        # 入彎前懸吊壓縮速度過快 → 前 bump 阻尼不足 / 軟前彈簧（重心轉移過大，三段彎道診斷.md:138）
+        # 出彎後（過 apex 後）懸吊回彈速度過快 → rebound 阻尼不足
+        # 0.10 / packet ≈ 6.0/s 的歸一化行程變化，是經驗門檻——多數平路打彎在 0.03-0.06。
+        def _max_pos_delta(vals, lo, hi):  # 壓縮速度（行程往 1 衝）
+            best = 0.0
+            for k in range(max(1, lo), min(len(vals), hi)):
+                d = vals[k] - vals[k - 1]
+                if d > best:
+                    best = d
+            return best
+
+        def _max_neg_delta(vals, lo, hi):  # 回彈速度（行程往 0 衝），回傳絕對值
+            best = 0.0
+            for k in range(max(1, lo), min(len(vals), hi)):
+                d = vals[k - 1] - vals[k]
+                if d > best:
+                    best = d
+            return best
+
+        entry_front_compress_rate = _max_pos_delta(front_susp_avg, 0, apex_local_idx)
+        entry_rear_compress_rate = _max_pos_delta(rear_susp_avg, 0, apex_local_idx)
+        exit_front_rebound_rate = _max_neg_delta(front_susp_avg,
+                                                   apex_phase_end_local + 1, len(front_susp_avg))
+        exit_rear_rebound_rate = _max_neg_delta(rear_susp_avg,
+                                                  apex_phase_end_local + 1, len(rear_susp_avg))
+
+        # === 缺陷 3：過 curb 甩飛偵測 ===
+        # 觸發條件（同一彎內任一 packet 同時滿足）：
+        #   (1) 任一輪在 rumble strip 上
+        #   (2) 該 packet 或前後 3 packet 內懸吊 Δ > 0.20（受到衝擊）
+        #   (3) AngularVelocityZ 偏離該彎平均 > 1.5 rad/s（車尾被踢開）
+        # 寬鬆估計，僅作標記而非精確計數。
+        curb_launch = False
+        if any(rumble_any):
+            avg_yaw = statistics.mean(ang_vel_z) if ang_vel_z else 0.0
+            for li in range(len(in_corner_pkts)):
+                if not rumble_any[li]:
+                    continue
+                # 看 ±3 packet 內的最大懸吊壓縮 Δ
+                lo, hi = max(1, li - 3), min(len(front_susp_avg), li + 4)
+                spike = max(
+                    _max_pos_delta(front_susp_avg, lo, hi),
+                    _max_pos_delta(rear_susp_avg, lo, hi),
+                    _max_neg_delta(front_susp_avg, lo, hi),
+                    _max_neg_delta(rear_susp_avg, lo, hi),
+                )
+                yaw_dev = abs(ang_vel_z[li] - avg_yaw)
+                if spike > 0.20 and yaw_dev > 1.5:
+                    curb_launch = True
+                    break
+
+        # === 缺陷 7：出彎 yaw 過衝（差速器 accel 過鬆驗證）===
+        # entry phase 的 max |yaw rate| vs exit phase 的 max |yaw rate|
+        # 出彎 yaw > 入彎 yaw × 1.5 → 後 diff accel 太鬆，車尾在出彎被 diff 釋放反而轉太多
+        # **修正**：原本用 AngularVelocityZ（其實是 roll），改用正確的 AngularVelocityY (yaw)
+        entry_yaw_peak = max((abs(ang_vel_y[k]) for k in range(0, apex_local_idx)),
+                             default=0.0)
+        exit_yaw_peak = max((abs(ang_vel_y[k]) for k in range(apex_phase_end_local + 1,
+                                                                len(ang_vel_y))),
+                            default=0.0)
+        # 至少 yaw 有意義（> 0.5 rad/s ≈ 28°/s）才作判斷
+        yaw_overshoot = (exit_yaw_peak > 0.5 and
+                         entry_yaw_peak > 0.3 and
+                         exit_yaw_peak > entry_yaw_peak * 1.5)
+
+        # === 缺陷 10：Exit phase「彎太多 + 加油太早」===
+        # HokiHoshi 2021 RWD 指南：過 apex 後應同時放鬆方向盤 + 加油 + 瞄外。
+        # 常見錯：仍在大角度轉向就已踩半油以上 → 阻礙出彎加速、RWD 易甩。
+        # 用「**該彎自己的 max 轉向 × ratio**」當門檻，跨彎類型可比較
+        # （髮夾彎 max 大、sweeper max 小，但 50% 都意味「仍在大角度」）。
+        corner_steer_max = max((abs(s) for s in steer), default=0)
+        # 至少 corner_steer_max 要 ≥ 20（避免幾乎不轉的彎觸發誤判）
+        exit_overturn_packets = 0
+        if corner_steer_max >= 20:
+            steer_threshold = corner_steer_max * EXIT_HARD_STEER_RATIO
+            for k in range(apex_phase_end_local + 1, len(in_corner_pkts)):
+                if abs(steer[k]) > steer_threshold and throttle[k] >= EXIT_EARLY_THROTTLE:
+                    exit_overturn_packets += 1
+        # 是否為「過彎太多」問題彎
+        is_overturn_corner = exit_overturn_packets >= EXIT_OVERTURN_MIN_PACKETS
 
         corners.append({
             "start": start, "end": end,
@@ -919,6 +1552,40 @@ def analyze_corners(valid_rows: list) -> dict:
                                      if max(rear_slip) > 0 else float('inf')),
             "understeer_packets": pkt_understeer,
             "oversteer_packets": pkt_oversteer,
+            # 缺陷 0：三段切片（entry/apex/exit）us/os 計數與該段封包數
+            "entry_us": phase_us['entry'], "entry_os": phase_os['entry'],
+            "entry_pkts": phase_pkts['entry'],
+            "mid_us": phase_us['apex'], "mid_os": phase_os['apex'],
+            "mid_pkts": phase_pkts['apex'],
+            "exit_us": phase_us['exit'], "exit_os": phase_os['exit'],
+            "exit_pkts": phase_pkts['exit'],
+            # 缺陷 1：左右輪 slip ratio Δ（差速器鎖定診斷）
+            "entry_lr_rear_delta": entry_lr_rear_delta,
+            "exit_lr_rear_delta": exit_lr_rear_delta,
+            "exit_lr_front_delta": exit_lr_front_delta,
+            # 缺陷 2：懸吊行程速度（壓縮/回彈，per 1/60 s）
+            "entry_front_compress_rate": entry_front_compress_rate,
+            "entry_rear_compress_rate": entry_rear_compress_rate,
+            "exit_front_rebound_rate": exit_front_rebound_rate,
+            "exit_rear_rebound_rate": exit_rear_rebound_rate,
+            # 缺陷 3：過 curb 甩飛
+            "curb_launch": curb_launch,
+            # 缺陷 7：出彎 yaw 過衝
+            "entry_yaw_peak": entry_yaw_peak,
+            "exit_yaw_peak": exit_yaw_peak,
+            "yaw_overshoot": yaw_overshoot,
+            # 缺陷 10：出彎「彎太多 + 加油太早」
+            "corner_steer_max": corner_steer_max,
+            "exit_overturn_packets": exit_overturn_packets,
+            "is_overturn_corner": is_overturn_corner,
+            # Yaw-rate-based US/OS（嚴重度與 slip 確認分層）
+            "us_severe_packets": pkt_us_severe,
+            "os_severe_packets": pkt_os_severe,
+            "us_moderate_packets": pkt_us_moderate,  # 含 severe
+            "os_moderate_packets": pkt_os_moderate,
+            "us_confirmed_packets": pkt_us_confirmed,  # yaw + slip 雙確認
+            "os_confirmed_packets": pkt_os_confirmed,
+            "top_imbalance": top_imbalance,
         })
 
     if not corners:
@@ -971,7 +1638,122 @@ def analyze_corners(valid_rows: list) -> dict:
                                 if total_in_corner_packets > 0 else 0.0),
         "oversteer_time_pct": (oversteer_packets_in_corners / total_in_corner_packets * 100
                                if total_in_corner_packets > 0 else 0.0),
+        # === Yaw-rate-based US/OS：嚴重度與 slip 確認彙總 ===
+        "us_severe_packets_in_corners": sum(c.get("us_severe_packets", 0) for c in corners),
+        "os_severe_packets_in_corners": sum(c.get("os_severe_packets", 0) for c in corners),
+        "us_moderate_packets_in_corners": sum(c.get("us_moderate_packets", 0) for c in corners),
+        "os_moderate_packets_in_corners": sum(c.get("os_moderate_packets", 0) for c in corners),
+        "us_confirmed_packets_in_corners": sum(c.get("us_confirmed_packets", 0) for c in corners),
+        "os_confirmed_packets_in_corners": sum(c.get("os_confirmed_packets", 0) for c in corners),
+        # === 缺陷 0：三段切片彙總（dominant = 該段 us/os 占該段 packet 數 >= 30% 且 us > os*2）===
+        # 對應 wiki/tuning/三段彎道診斷.md 的入彎/中段/出彎不同處方表
+        "entry_us_corners": _phase_dominant_count(corners, 'entry', 'us'),
+        "mid_us_corners":   _phase_dominant_count(corners, 'mid',   'us'),
+        "exit_us_corners":  _phase_dominant_count(corners, 'exit',  'us'),
+        "entry_os_corners": _phase_dominant_count(corners, 'entry', 'os'),
+        "mid_os_corners":   _phase_dominant_count(corners, 'mid',   'os'),
+        "exit_os_corners":  _phase_dominant_count(corners, 'exit',  'os'),
+        # 各段累計 us/os 時間佔比（packet 級）
+        "entry_us_time_pct": _phase_pct(corners, 'entry', 'us'),
+        "mid_us_time_pct":   _phase_pct(corners, 'mid',   'us'),
+        "exit_us_time_pct":  _phase_pct(corners, 'exit',  'us'),
+        "entry_os_time_pct": _phase_pct(corners, 'entry', 'os'),
+        "mid_os_time_pct":   _phase_pct(corners, 'mid',   'os'),
+        "exit_os_time_pct":  _phase_pct(corners, 'exit',  'os'),
+        # === 缺陷 1：左右輪 slip ratio Δ 異常彎統計 ===
+        # 出彎後輪 Δ > 0.20 → 後 diff accel 太鬆（一輪 spin 一輪有抓地）
+        # 出彎前輪 Δ > 0.20 → 前 diff accel 太鬆（FWD/AWD）
+        # 入彎後輪 Δ > 0.15 → 後 diff decel 太鬆
+        "exit_diff_rear_loose_corners": sum(1 for c in corners if c["exit_lr_rear_delta"] > 0.20),
+        "exit_diff_front_loose_corners": sum(1 for c in corners if c["exit_lr_front_delta"] > 0.20),
+        "entry_diff_rear_loose_corners": sum(1 for c in corners if c["entry_lr_rear_delta"] > 0.15),
+        "max_exit_lr_rear_delta": max((c["exit_lr_rear_delta"] for c in corners), default=0.0),
+        "max_exit_lr_front_delta": max((c["exit_lr_front_delta"] for c in corners), default=0.0),
+        # === 缺陷 2：懸吊壓縮/回彈速度（門檻 0.10 / packet ≈ 6/s）===
+        "entry_front_overcompress_corners": sum(1 for c in corners
+                                                  if c["entry_front_compress_rate"] > 0.10),
+        "entry_rear_overcompress_corners":  sum(1 for c in corners
+                                                  if c["entry_rear_compress_rate"] > 0.10),
+        "exit_front_rebound_high_corners":  sum(1 for c in corners
+                                                  if c["exit_front_rebound_rate"] > 0.10),
+        "exit_rear_rebound_high_corners":   sum(1 for c in corners
+                                                  if c["exit_rear_rebound_rate"] > 0.10),
+        "max_entry_front_compress_rate": max((c["entry_front_compress_rate"]
+                                              for c in corners), default=0.0),
+        "max_exit_rear_rebound_rate":    max((c["exit_rear_rebound_rate"]
+                                              for c in corners), default=0.0),
+        # === 缺陷 3：過 curb 甩飛事件數 ===
+        "curb_launch_corners": sum(1 for c in corners if c["curb_launch"]),
+        # === 缺陷 10：出彎「彎太多 + 加油太早」彎數 ===
+        "exit_overturn_corners": sum(1 for c in corners if c.get("is_overturn_corner")),
+        "exit_overturn_total_packets": sum(c.get("exit_overturn_packets", 0) for c in corners),
+        # === 缺陷 7：出彎 yaw 過衝彎數 ===
+        "yaw_overshoot_corners": sum(1 for c in corners if c["yaw_overshoot"]),
+        # === 缺陷 6：S 彎過渡（快速 L↔R）統計 ===
+        # 對應三段彎道診斷.md:133「快速 left→right 過渡 under/oversteer → 阻尼與 ARB」
+        # 過渡彎定義：相鄰兩彎方向相反，且 end_i → start_{i+1} 間距 < 1.0s（60 packet）
+        # 過渡彎有問題：兩彎中至少一彎 us 或 os 顯著高於該段所有彎平均
+        **_analyze_s_transitions(corners),
     }
+
+
+def _analyze_s_transitions(corners: list) -> dict:
+    """缺陷 6：偵測 S 彎過渡與其問題彎數。"""
+    if len(corners) < 2:
+        return {"s_transition_count": 0, "s_transition_trouble_count": 0}
+    GAP_PKT = 60  # 1.0s @ 60 Hz
+    avg_us_pkts = (statistics.mean(c["understeer_packets"] for c in corners)
+                   if corners else 0)
+    avg_os_pkts = (statistics.mean(c["oversteer_packets"] for c in corners)
+                   if corners else 0)
+    transitions = 0
+    trouble = 0
+    for i in range(len(corners) - 1):
+        a, b = corners[i], corners[i + 1]
+        if a["direction"] == b["direction"]:
+            continue
+        gap = b["start"] - a["end"]
+        if gap > GAP_PKT or gap < 0:
+            continue
+        transitions += 1
+        # 該過渡 pair 中任一彎 us 或 os > 該場均值 1.5×
+        a_bad = (a["understeer_packets"] > avg_us_pkts * 1.5 or
+                 a["oversteer_packets"] > avg_os_pkts * 1.5)
+        b_bad = (b["understeer_packets"] > avg_us_pkts * 1.5 or
+                 b["oversteer_packets"] > avg_os_pkts * 1.5)
+        if a_bad or b_bad:
+            trouble += 1
+    return {"s_transition_count": transitions, "s_transition_trouble_count": trouble}
+
+
+def _phase_dominant_count(corners: list, phase: str, kind: str) -> int:
+    """Count corners where `phase` (entry/mid/exit) is dominated by us/os.
+
+    Dominant = phase has >= 30% of its packets flagged us/os AND that count
+    is >= 2× the opposite. Skips corners with too few packets in that phase
+    (< 6 ≈ 0.1s) to avoid noise."""
+    cnt = 0
+    pkts_key = f'{phase}_pkts'
+    me_key = f'{phase}_{kind}'
+    op_key = f'{phase}_{"os" if kind == "us" else "us"}'
+    for c in corners:
+        n = c[pkts_key]
+        if n < 6:
+            continue
+        me = c[me_key]
+        op = c[op_key]
+        if me / n >= 0.30 and me >= max(op * 2, 2):
+            cnt += 1
+    return cnt
+
+
+def _phase_pct(corners: list, phase: str, kind: str) -> float:
+    """Total us/os packets in `phase` ÷ total packets in `phase`, all corners."""
+    pkts_key = f'{phase}_pkts'
+    val_key = f'{phase}_{kind}'
+    total = sum(c[pkts_key] for c in corners)
+    me = sum(c[val_key] for c in corners)
+    return (me / total * 100) if total > 0 else 0.0
 
 
 def _score_problem_corner(c: dict, valid_rows: list, steer_max_obs: int) -> dict:
@@ -1280,154 +2062,59 @@ def fmt_suspension_table(susp_data: dict) -> list[str]:
     return out
 
 
-# ----- drivetrain-aware TL;DR helpers ----------------------------------------
-
-# Actions that only make sense for certain drivetrains. Keys are exact action
-# strings as they may appear in any finding's "tuning" list; values are the
-# set of drivetrain_type ints (0=FWD, 1=RWD, 2=AWD) for which the action is
-# valid. An action NOT in this dict is allowed for all drivetrains.
-#
-# Two failure modes drove this table:
-#   1. RWD oversteer sessions were getting 「動力分配往前移」 (no center diff
-#      to redistribute) and 「提高後胎壓」 (the AWD wheelspin trick — wrong
-#      sign for RWD oversteer; you want to *lower* rear pressure).
-#   2. FWD getting "軟後防傾桿" advice when it would actually want the
-#      opposite (stiffer rear ARB to rotate the car).
-DRIVETRAIN_ACTION_GUARD: dict[str, set[int]] = {
-    'AWD 若可調：動力分配往前移 5-10%': {2},
-    'AWD 若可調：動力分配往後移 5-10%': {2},
-    '動力分配往前移 5-10%': {2},
-    '動力分配往後移': {2},
-    '動力分配往後移 5-10%': {2},
-    '提高後胎壓 1-2 psi（反直覺但能釋放動力）': {2},  # AWD-only trick
-}
-
-
-def _filter_actions_by_drivetrain(actions: list[str], drivetrain_type: int) -> list[str]:
-    """Drop actions whose DRIVETRAIN_ACTION_GUARD set excludes this drivetrain."""
-    out = []
-    for a in actions:
-        allowed = DRIVETRAIN_ACTION_GUARD.get(a)
-        if allowed is None or drivetrain_type in allowed:
-            out.append(a)
+def fmt_suspension_range_table(susp_data: dict) -> list[str]:
+    """Per-corner 在 15-85% 健康範圍佔比 + std 振幅。"""
+    out = ['| 段 | FL 範圍% | FR 範圍% | RL 範圍% | RR 範圍% | FL std | FR std | RL std | RR std |',
+           '|----|----------|----------|----------|----------|--------|--------|--------|--------|']
+    for r in susp_data["per_segment"]:
+        def cell(pct):
+            return f'**{pct:.0f}**' if pct < 60 else f'{pct:.0f}'
+        out.append(f'| {r["label"]} | {cell(r["fl_in_15_85"])} | {cell(r["fr_in_15_85"])} | '
+                  f'{cell(r["rl_in_15_85"])} | {cell(r["rr_in_15_85"])} | '
+                  f'{r["fl_std"]:.3f} | {r["fr_std"]:.3f} | '
+                  f'{r["rl_std"]:.3f} | {r["rr_std"]:.3f} |')
     return out
 
 
-# 把處方字串 normalize 成 canonical key 用於去重（去括號補充說明、AWD 前綴、結尾百分比）。
-# 例：「軟化加速差速器鎖定 5-10%（讓內輪能空轉緩衝）」與「軟化加速差速器鎖定 5-10%」
-# canonical 後都是「軟化加速差速器鎖定」。
-_CANON_PAREN = re.compile(r'[（(].*?[)）]')
-_CANON_PREFIX = re.compile(r'^AWD 若可調：')
-_CANON_TAIL_PCT = re.compile(r'\s*\d+(?:\.\d+)?(?:-\d+(?:\.\d+)?)?\s*%?\s*$')
-
-
-def _canonical_action_key(action: str) -> str:
-    s = _CANON_PAREN.sub('', action).strip()
-    s = _CANON_PREFIX.sub('', s).strip()
-    s = _CANON_TAIL_PCT.sub('', s).strip()
-    return s
-
-
-# 互斥處方組——同 group 內最多保留一條（依 finding severity 排序，先進先保留）。
-# 用 canonical key 為輸入。例：當推頭主症狀加了「動力分配往後移」，後續其他症狀
-# 想加「動力分配往前移」時，因兩者同 group 直接跳過。
-_CONFLICT_GROUPS: dict[str, str] = {
-    '動力分配往前移': 'center_diff',
-    '動力分配往後移': 'center_diff',
-    '加前差加速鎖定': 'front_diff_accel',
-    '前差加速鎖定降': 'front_diff_accel',
-    '後差加速鎖定加': 'rear_diff_accel',
-    '後差加速鎖定降': 'rear_diff_accel',
-}
+# ----- finding helpers -------------------------------------------------------
+#
+# Findings 形狀：{severity, title, wiki, hint, driving}
+#   wiki    — 對應的 wiki 章節指引（race-analyst 會 Read 該頁）
+#   hint    — 一句話「通常方向」，僅作粗略指引；具體處方由 race-analyst
+#             結合車況、當前 tune、駕駛軌跡、wiki 處方表綜合後才下
+#   driving — 列點式駕駛建議（universal、可立即試的低風險動作）
+#
+# Summarize 不下調校處方、不做互斥仲裁、不依驅動方式分支處方文字。處方權與
+# 仲裁是 race-analyst skill 的工作。本檔的 helpers 因此只剩 _wheelspin_finding
+# 一個（drivetrain-aware 的標題與 hint，內聯到 call site 不方便所以抽出）。
 
 
 def _wheelspin_finding(wheelspin_pkts: int, drivetrain_type: int) -> dict:
-    """Build the rear-wheelspin finding with prescriptions tailored to drivetrain.
-
-    For RWD this is treated as power oversteer evidence — the prescriptions
-    follow the RWD oversteer column of the project's drivetrain action table:
-    soften (not stiffen) rear, lower (not raise) rear pressure, ease the rear
-    diff on accel, firm it on decel.
-
-    For AWD the historical prescriptions still apply (rear pressure trick,
-    forward power split, looser accel diff).
-
-    For FWD wheelspin > 60 packets is unusual (wrong wheels) but we keep a
-    minimal prescription set in case it triggers on a FF car running wide
-    rear tires off-camber.
-    """
+    """Drivetrain-aware title + wiki pointer for sustained rear wheelspin."""
     sec = wheelspin_pkts / 60
     if drivetrain_type == 1:  # RWD
         return {
             "severity": "🔴",
             "title": f'後輪嚴重打滑 {sec:.1f}s（RWD power oversteer 訊號 / 出彎給油過猛 / 後軸過硬）',
-            "tuning": [
-                '降後胎壓 1-2 psi',
-                '軟後防傾桿 1-2 級',
-                '加後外傾 0.3-0.5°',
-                '後差加速鎖定降 5-10%（讓內輪能空轉緩衝）',
-                '後差減速鎖定加 20-30%（穩定入彎）',
-            ],
+            "wiki": "[tuning/差速器.md] + [tuning/三段彎道診斷.md] 出彎 OS / RWD 出彎",
+            "hint": "RWD 出彎 OS：節流量管理優先；真要調 → 後 diff accel 鬆 / 後 ARB 軟 / 後胎壓降 / 加後外傾",
             "driving": ['出彎漸進給油，前 0.5 秒不要全踩', '彎心後等車身擺正再加油'],
         }
     if drivetrain_type == 2:  # AWD
         return {
             "severity": "🟡",
             "title": f'後輪嚴重打滑 {sec:.1f}s（差速器 / 動力分配 / 出彎習慣）',
-            "tuning": [
-                # 明確指後差，避免與推頭處方的「前差加速」混淆
-                '後差加速鎖定降 5-10%（讓內輪能空轉緩衝）',
-                'AWD 若可調：動力分配往前移 5-10%',
-                '提高後胎壓 1-2 psi（反直覺但能釋放動力）',
-            ],
+            "wiki": "[tuning/差速器.md] 後差 + 中差章節",
+            "hint": "AWD 通常 → 後 diff accel 鎖定降 / 動力分配往前移 / 提高後胎壓（反直覺但有效）",
             "driving": ['出彎漸進給油，前 0.5 秒不要全踩'],
         }
-    # FWD (rear wheelspin is rare — minimal prescription)
     return {
         "severity": "ℹ️",
-        "title": f'後輪打滑 {sec:.1f}s（FWD 後輪打滑通常為負重轉移／壓縁石所致，較不影響動力）',
-        "tuning": ['降後胎壓 1-2 psi', '加後外傾 0.3-0.5°'],
+        "title": f'後輪打滑 {sec:.1f}s（FWD 後輪打滑通常為負重轉移／壓縐石所致，較不影響動力）',
+        "wiki": "—",
+        "hint": "FWD 後輪打滑罕見，通常無需處方",
         "driving": [],
     }
-
-
-def _understeer_tuning_for_drivetrain(drivetrain_type: int) -> list[str]:
-    """Front-hot / understeer prescriptions vary by drivetrain.
-
-    RWD/AWD: soften front, lower front pressure, more front camber.
-    AWD additionally: push power forward (less rear-bias), soften accel diff.
-    FWD: lower front pressure, soften front ARB, ease front diff on accel.
-    """
-    if drivetrain_type == 0:  # FWD
-        return ['降前胎壓 1-2 psi', '軟前防傾桿 1-2 級', '加前外傾 0.3-0.5°（往 -3.0 方向）',
-                '前差加速鎖定降 5-10%（FWD 出彎才不會推頭）']
-    if drivetrain_type == 2:  # AWD
-        # 推頭主症狀 → 動力分配往「後」移：讓前輪不必同時拉動力+轉向（中差% 拉高）。
-        # 早期版本誤寫「往前移」，與後輪打滑處方衝突。對應 wiki/tuning/差速器.md
-        # 「中央差速器」段。
-        return ['降前胎壓 1-2 psi', '加前外傾 0.3-0.5°（往 -3.0 方向）', '軟前防傾桿 1-2 級',
-                'AWD 若可調：動力分配往後移 5-10%', '加前差加速鎖定 5-10%（改善低速彎入彎推頭）']
-    # RWD
-    return ['降前胎壓 1-2 psi', '加前外傾 0.3-0.5°（往 -3.0 方向）', '軟前防傾桿 1-2 級',
-            '加後防傾桿 1 級（反向幫前軸轉向）']
-
-
-def _oversteer_tuning_for_drivetrain(drivetrain_type: int) -> list[str]:
-    """Rear-hot / oversteer prescriptions vary by drivetrain.
-
-    RWD: soften rear, lower rear pressure, more rear camber, easier accel diff,
-         firmer decel diff. NEVER 'raise rear pressure' (that's the AWD trick).
-    AWD: same softening + push power back.
-    FWD: rear-hot is rare; soften rear, lower rear pressure.
-    """
-    if drivetrain_type == 0:  # FWD
-        return ['降後胎壓 1-2 psi', '軟後防傾桿 1-2 級', '加後外傾 0.3-0.5°']
-    if drivetrain_type == 2:  # AWD
-        return ['降後胎壓 1-2 psi', '軟後防傾桿 1-2 級', '加後外傾 0.3-0.5°',
-                '動力分配往後移']
-    # RWD
-    return ['降後胎壓 1-2 psi', '軟後防傾桿 1-2 級', '加後外傾 0.3-0.5°',
-            '後差加速鎖定降 5-10%', '後差減速鎖定加 20-30%']
 
 
 # ----- report builder --------------------------------------------------------
@@ -1443,9 +2130,12 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         rows = list(csv.DictReader(f))
     meta = json.loads(meta_path.read_text(encoding='utf-8'))
 
-    pre_crash_valid = [r for r in rows if r['IsRaceOn'] == '1' and r['is_rewind'] == '0']
+    # Rewind-aware filter：對每個 CRT 時刻只保留錄製時間最晚的 packet
+    # （= 玩家最終定案的線；rewind 前的失敗嘗試自動排除）。
+    # 不再依 is_rewind 欄位——舊邏輯把標籤搞反了，會丟棄玩家的 redo 而保留失敗。
+    pre_crash_valid, n_superseded = dedupe_attempts(rows)
     if not pre_crash_valid:
-        return (f'# {session_dir.name}\n\n沒有可分析的有效資料（IsRaceOn=1 且非 rewind）。\n', None)
+        return (f'# {session_dir.name}\n\n沒有可分析的有效資料（所有 IsRaceOn=1 packet 都被後續 redo 取代）。\n', None)
 
     # Filter crash-affected packets (G-force spikes, sudden velocity drops).
     # Crashes pollute G-force max, decel-event ranking, suspension bottom counts,
@@ -1471,6 +2161,7 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     tires = analyze_tires(segments)
     slip = analyze_slip(segments)
     susp = analyze_suspension(segments)
+    brake_balance = analyze_brake_balance(valid)
     rpm_obs = analyze_rpm_observed(valid)
     dyno = analyze_dyno(valid)
     drvtrn = analyze_drivetrain(valid, dyno=dyno)
@@ -1478,10 +2169,14 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     gforces = analyze_g_forces(valid, pre_crash_rows=pre_crash_valid)
     decels = analyze_decel_events(valid)
     speed = analyze_speed(valid)
+    drivetrain_type_pre = meta["car"]["drivetrain_type"]
+    launch = analyze_launch(valid, drivetrain_type_pre)
     surf = analyze_surface(valid)
+    aero = analyze_aero(valid)
     wheelspin = analyze_wheelspin(valid)
     wheelspin_pkts = wheelspin["count"]
     corners = analyze_corners(valid)
+    pi_grip = analyze_pi_grip_target(gforces, meta, corners)
     wheelspin_phases = classify_wheelspin_phases(wheelspin["indices"], corners.get("corners", []))
     drivetrain_type = meta["car"]["drivetrain_type"]
     drivetrain_name = DRIVETRAIN_NAMES.get(drivetrain_type, "?")
@@ -1498,39 +2193,397 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     total_corner_pkts = corners.get("total_in_corner_packets", 0) if corners["count"] > 0 else 0
     us_pkts_corner = corners.get("understeer_packets_in_corners", 0) if corners["count"] > 0 else 0
     os_pkts_corner = corners.get("oversteer_packets_in_corners", 0) if corners["count"] > 0 else 0
+    us_severe = corners.get("us_severe_packets_in_corners", 0)
+    os_severe = corners.get("os_severe_packets_in_corners", 0)
+    us_moderate = corners.get("us_moderate_packets_in_corners", 0)
+    os_moderate = corners.get("os_moderate_packets_in_corners", 0)
+    us_confirmed = corners.get("us_confirmed_packets_in_corners", 0)
+    os_confirmed = corners.get("os_confirmed_packets_in_corners", 0)
     if total_corner_pkts > 0:
         us_time_pct = us_pkts_corner / total_corner_pkts * 100
         os_time_pct = os_pkts_corner / total_corner_pkts * 100
-        us_os_ratio = us_pkts_corner / max(os_pkts_corner, 1)
-        os_us_ratio = os_pkts_corner / max(us_pkts_corner, 1)
-        # 推頭主症狀：比例 >= 3:1 且 彎內時間佔比 >= 15%
-        # （門檻原寫 20%，但實測中 18% + 3:1 的場景已經是駕駛體感明顯推頭，
-        #  把門檻設 15% 才能捕捉這類場景；嚴重度（⛔ vs 🟡）依比例 5:1 / 時間 30% 區分。）
-        if us_os_ratio >= 3 and us_time_pct >= 15:
-            severity = "⛔" if (us_os_ratio >= 5 or us_time_pct >= 30) else "🟡"
+        us_severe_pct = us_severe / total_corner_pkts * 100
+        os_severe_pct = os_severe / total_corner_pkts * 100
+        us_moderate_pct = us_moderate / total_corner_pkts * 100
+        os_moderate_pct = os_moderate / total_corner_pkts * 100
+        us_confirmed_pct = (us_confirmed / us_pkts_corner * 100) if us_pkts_corner > 0 else 0
+        os_confirmed_pct = (os_confirmed / os_pkts_corner * 100) if os_pkts_corner > 0 else 0
+
+        # Yaw-rate-based 法判定（取代舊 slip-angle ratio 法的雙門檻）
+        # - severe % >= 5% → ⛔（明確失控等級）
+        # - moderate %（含 severe）>= 15% → 🔴（明顯偏向）
+        # - moderate % >= 8% → 🟡（輕度偏向）
+        # 信心註記：confirmed (yaw + slip) 比 ≥ 50% → "高信心 (slip 確認)"，否則
+        # 標 "kinematic only — 可能含 banked corner/感測雜訊"
+        def _confidence_note(confirmed_pct: float) -> str:
+            if confirmed_pct >= 50:
+                return f'，slip-angle 雙確認（{confirmed_pct:.0f}%）'
+            if confirmed_pct >= 25:
+                return f'，部分 slip 確認（{confirmed_pct:.0f}%）'
+            return '，kinematic only（未 slip 確認）'
+
+        # 推頭判定（用 moderate-or-worse）
+        if us_moderate_pct >= 8 and us_moderate >= os_moderate * 1.5:
+            # ⛔ 必須 severe ≥ 5% **AND** confirmed ≥ 30%（避免 healthy oversteer
+            # 等 transient 誤觸發；slip-angle 雙確認才升級為 ⛔）
+            if us_severe_pct >= 5 and us_confirmed_pct >= 30:
+                sev = "⛔"
+                sev_label = f'⛔ severe {us_severe_pct:.0f}% + slip 雙確認'
+            elif us_moderate_pct >= 15:
+                sev = "🔴"
+                sev_label = f'🔴 moderate+ {us_moderate_pct:.0f}%'
+            else:
+                sev = "🟡"
+                sev_label = f'🟡 mild-moderate {us_moderate_pct:.0f}%'
+            conf_note = _confidence_note(us_confirmed_pct)
             findings.append({
-                "severity": severity,
-                "title": (f'整體推頭傾向（彎內 {us_time_pct:.0f}% 時間推頭，'
-                          f'推頭/過度比 {us_os_ratio:.1f}:1）'),
-                "tuning": _understeer_tuning_for_drivetrain(drivetrain_type),
+                "severity": sev,
+                "title": (f'整體推頭傾向（{sev_label}{conf_note}；'
+                          f'yaw-rate 偏差法）'),
+                "wiki": "[tuning/三段彎道診斷.md] 整體 US 對策清單 + [tuning/胎壓.md] / [tuning/防傾桿.md]",
+                "hint": "通常涉及前胎壓 / 軟前 ARB / 加前 camber；AWD 中差偏後、FWD 降前 diff accel",
                 "driving": ['入彎再慢 3-5 km/h、轉向更線性，避免打到 saturate 還繼續加角度'],
             })
-        elif os_us_ratio >= 3 and os_time_pct >= 15:
-            severity = "⛔" if (os_us_ratio >= 5 or os_time_pct >= 30) else "🟡"
+        elif os_moderate_pct >= 8 and os_moderate >= us_moderate * 1.5:
+            if os_severe_pct >= 5 and os_confirmed_pct >= 30:
+                sev = "⛔"
+                sev_label = f'⛔ severe {os_severe_pct:.0f}% + slip 雙確認'
+            elif os_moderate_pct >= 15:
+                sev = "🔴"
+                sev_label = f'🔴 moderate+ {os_moderate_pct:.0f}%'
+            else:
+                sev = "🟡"
+                sev_label = f'🟡 mild-moderate {os_moderate_pct:.0f}%'
+            conf_note = _confidence_note(os_confirmed_pct)
             findings.append({
-                "severity": severity,
-                "title": (f'整體轉向過度傾向（彎內 {os_time_pct:.0f}% 時間轉向過度，'
-                          f'過度/推頭比 {os_us_ratio:.1f}:1）'),
-                "tuning": _oversteer_tuning_for_drivetrain(drivetrain_type),
+                "severity": sev,
+                "title": (f'整體轉向過度傾向（{sev_label}{conf_note}；'
+                          f'yaw-rate 偏差法）'),
+                "wiki": "[tuning/三段彎道診斷.md] OS 對策（US 對策反向） + [tuning/差速器.md]",
+                "hint": "通常涉及後胎壓 / 軟後 ARB / 加後 camber；RWD 注意是 power OS 還是 lift-off",
                 "driving": ['出彎油門更線性，前 0.5s 控制在 70%；入彎避免 trail brake 過深'],
             })
+
+    # === 缺陷 0：三段切片 dominant 段定位（對應三段彎道診斷.md 不同處方表）===
+    # 即使整體 us/os 沒過門檻，個別段的問題若 dominant 多彎也值得提示。
+    # 「dominant 彎數 >= 3 且 >= 總彎數 25%」才觸發，避免單一彎拉警報。
+    if corners["count"] >= 4:
+        n = corners["count"]
+        phase_label = {'entry': '入彎', 'mid': '中段', 'exit': '出彎'}
+        for ph in ('entry', 'mid', 'exit'):
+            us_n = corners[f'{ph}_us_corners']
+            os_n = corners[f'{ph}_os_corners']
+            us_pct = corners[f'{ph}_us_time_pct']
+            os_pct = corners[f'{ph}_os_time_pct']
+            phase_us_hints = {
+                'entry': '通常：軟前 ARB / 前 toe out / 降前 diff decel / 加前 bump 阻尼 / 煞車平衡偏前',
+                'mid':   '通常：硬後 ARB + 硬後彈簧（讓尾巴幫前軸轉）+ 加後 rebound + 後 bump',
+                'exit':  '通常：差速器（AWD 中差偏後 + 加後 diff accel；FWD 加前 diff accel；RWD 加後 diff accel）',
+            }
+            phase_os_hints = {
+                'entry': '通常：硬前 ARB / 前 toe in / 加前 diff decel / 減前 bump / 煞車平衡偏後',
+                'mid':   '通常：軟後 ARB + 軟後彈簧 + 減後 rebound + 加後 camber',
+                'exit':  'RWD：節流量管理優先；真要調 → 後 diff accel 鬆 / 後 ARB 軟 / 後胎壓降',
+            }
+            if us_n >= 3 and us_n / n >= 0.25:
+                findings.append({
+                    "severity": "🟡",
+                    "title": (f'{phase_label[ph]} understeer 主導 {us_n}/{n} 個彎'
+                              f'（該段時間推頭佔 {us_pct:.0f}%）'),
+                    "wiki": f"[tuning/三段彎道診斷.md] {phase_label[ph]} understeer 對策清單",
+                    "hint": phase_us_hints[ph],
+                    "driving": [],
+                })
+            if os_n >= 3 and os_n / n >= 0.25:
+                exit_driving = ['出彎油門更線性'] if ph == 'exit' else []
+                findings.append({
+                    "severity": "🟡",
+                    "title": (f'{phase_label[ph]} oversteer 主導 {os_n}/{n} 個彎'
+                              f'（該段時間轉向過度佔 {os_pct:.0f}%）'),
+                    "wiki": f"[tuning/三段彎道診斷.md] {phase_label[ph]} oversteer 對策清單",
+                    "hint": phase_os_hints[ph],
+                    "driving": exit_driving,
+                })
+
+    # === 缺陷 1：左右輪 slip ratio Δ（差速器鎖定診斷）===
+    # 差速器.md:155-188 直接告訴你 diff lock 鬆/緊的對應症狀。
+    # 後輪出彎左右差距大 → diff accel 太鬆，一邊空轉一邊有抓地。
+    if corners["count"] >= 4:
+        n = corners["count"]
+        rear_loose = corners["exit_diff_rear_loose_corners"]
+        front_loose = corners["exit_diff_front_loose_corners"]
+        decel_loose = corners["entry_diff_rear_loose_corners"]
+        if rear_loose >= 3 and rear_loose / n >= 0.25 and drivetrain_type in (1, 2):
+            findings.append({
+                "severity": "🟡",
+                "title": (f'出彎後輪左右 slip Δ 過大 {rear_loose}/{n} 個彎'
+                          f'（max Δ {corners["max_exit_lr_rear_delta"]:.2f}）'),
+                "wiki": "[tuning/差速器.md:155-188] 後差加速鎖定",
+                "hint": "通常 → 加後 diff accel 鎖定 5-10%（讓兩後輪轉速更同步）",
+                "driving": ['出彎前 0.5s 收一點油門，避免內輪先空轉'],
+            })
+        if front_loose >= 3 and front_loose / n >= 0.25 and drivetrain_type in (0, 2):
+            findings.append({
+                "severity": "🟡",
+                "title": (f'出彎前輪左右 slip Δ 過大 {front_loose}/{n} 個彎'
+                          f'（max Δ {corners["max_exit_lr_front_delta"]:.2f}）'),
+                "wiki": "[tuning/差速器.md] 前差加速鎖定（FWD/AWD）",
+                "hint": "通常 → 加前 diff accel 鎖定 5-10%（改善低速彎出彎拉力）",
+                "driving": [],
+            })
+        if decel_loose >= 3 and decel_loose / n >= 0.25:
+            findings.append({
+                "severity": "🟡",
+                "title": (f'入彎後輪左右 slip Δ 過大 {decel_loose}/{n} 個彎'
+                          f'（鬆油時兩輪轉速不同步、入彎不穩）'),
+                "wiki": "[tuning/差速器.md] 後差減速鎖定",
+                "hint": "通常 → 加後 diff decel 鎖定 10-20%（拉力 / 越野更明顯）",
+                "driving": [],
+            })
+
+    # === 缺陷 2：懸吊壓縮/回彈速度過快（阻尼診斷）===
+    # 三段彎道診斷.md:138「車太彈、重心轉移過大」→ 加 bump 阻尼 + 加彈簧硬度
+    # 阻尼.md：bump 控制壓縮、rebound 控制回彈
+    if corners["count"] >= 4:
+        n = corners["count"]
+        ef = corners["entry_front_overcompress_corners"]
+        er = corners["entry_rear_overcompress_corners"]
+        rf = corners["exit_front_rebound_high_corners"]
+        rr = corners["exit_rear_rebound_high_corners"]
+        if ef >= 3 and ef / n >= 0.25:
+            findings.append({
+                "severity": "🟡",
+                "title": (f'入彎前懸吊壓縮過快 {ef}/{n} 個彎'
+                          f'（max Δ {corners["max_entry_front_compress_rate"]:.3f}/packet）'),
+                "wiki": "[tuning/阻尼.md] bump + [tuning/三段彎道診斷.md:138]「車太彈、重心轉移過大」",
+                "hint": "通常 → 加前 bump 阻尼 1-2 級，或硬前彈簧 5%",
+                "driving": ['入彎更線性減速、避免 brake stab'],
+            })
+        if er >= 3 and er / n >= 0.25:
+            findings.append({
+                "severity": "🟡",
+                "title": f'入彎後懸吊壓縮過快 {er}/{n} 個彎',
+                "wiki": "[tuning/阻尼.md] bump",
+                "hint": "通常 → 加後 bump 阻尼 1-2 級",
+                "driving": [],
+            })
+        if rf >= 3 and rf / n >= 0.25:
+            findings.append({
+                "severity": "🟡",
+                "title": f'出彎前懸吊回彈過快 {rf}/{n} 個彎',
+                "wiki": "[tuning/阻尼.md] rebound",
+                "hint": "通常 → 加前 rebound 阻尼 1-2 級",
+                "driving": [],
+            })
+        if rr >= 3 and rr / n >= 0.25:
+            findings.append({
+                "severity": "🟡",
+                "title": (f'出彎後懸吊回彈過快 {rr}/{n} 個彎'
+                          f'（max Δ {corners["max_exit_rear_rebound_rate"]:.3f}/packet，出彎後車身彈跳）'),
+                "wiki": "[tuning/阻尼.md] rebound",
+                "hint": "通常 → 加後 rebound 阻尼 1-2 級",
+                "driving": [],
+            })
+
+    # === 缺陷 3：過 curb 甩飛 ===
+    # 三段彎道診斷.md:134「過 curb 容易把車甩飛 → 降低 bump 阻尼」
+    # B2 gating：越野賽道路面本來就持續顛簸 + rumble strip 訊號失真 → 不報，避免誤判
+    if (corners.get("curb_launch_corners", 0) >= 2
+        and surf.get("surface_type") != "offroad"):
+        cl = corners["curb_launch_corners"]
+        findings.append({
+            "severity": "🟡",
+            "title": f'過 curb 甩飛事件 {cl} 次（壓縐石後車身被踢開）',
+            "wiki": "[tuning/三段彎道診斷.md:134]",
+            "hint": "通常 → 降 bump 阻尼 1-2 級（縐石衝擊吸收更柔）",
+            "driving": ['壓縐石的角度小一點、車身正一點再壓'],
+        })
+
+    # === 缺陷 5：胎不夠熱 + over/understeer 組合（三段彎道診斷.md:135-137）===
+    # 全車整體偏冷 + 推頭/過度 → 一次解兩個問題：toe out/in
+    # 門檻：依 surface_type 區分（B2 gating）—
+    #   公路（race/sport 胎）：< 65°C 偏冷
+    #   拉力（rally 胎）：< 55°C 偏冷
+    #   越野（offroad 胎）：< 50°C 偏冷（offroad 胎本來就跑得比較涼）
+    cold_threshold = {"road": 65, "rally": 55, "offroad": 50}.get(
+        surf.get("surface_type", "road"), 65)
+    if tires["overall"] and total_corner_pkts > 0:
+        ovr = tires["overall"]
+        avg_all = (ovr["fl"] + ovr["fr"] + ovr["rl"] + ovr["rr"]) / 4
+        if avg_all < cold_threshold:
+            us_pct_chk = us_pkts_corner / total_corner_pkts * 100
+            os_pct_chk = os_pkts_corner / total_corner_pkts * 100
+            if us_pct_chk >= 15 and us_pct_chk > os_pct_chk * 1.5:
+                findings.append({
+                    "severity": "🟡",
+                    "title": f'胎溫偏冷（四輪均 {avg_all:.0f}°C）+ 推頭傾向',
+                    "wiki": "[tuning/三段彎道診斷.md:135] 胎冷 + US",
+                    "hint": "通常 → 全車 toe out +0.1°（前後各 +0.1，總和 ≤ 0.3°）一次解兩個問題",
+                    "driving": ['前 1-2 圈先暖胎再開始衝圈速'],
+                })
+            elif os_pct_chk >= 15 and os_pct_chk > us_pct_chk * 1.5:
+                findings.append({
+                    "severity": "🟡",
+                    "title": f'胎溫偏冷（四輪均 {avg_all:.0f}°C）+ 轉向過度',
+                    "wiki": "[tuning/三段彎道診斷.md:136] 胎冷 + OS",
+                    "hint": "通常 → 全車 toe in +0.1°（前後各 +0.1）一次解兩個問題",
+                    "driving": ['前 1-2 圈先暖胎再開始衝圈速'],
+                })
+            else:
+                findings.append({
+                    "severity": "ℹ️",
+                    "title": f'胎溫整體偏冷（四輪均 {avg_all:.0f}°C），抓地未達峰值',
+                    "wiki": "[tuning/三段彎道診斷.md:137] 胎冷無方向偏好 + [tuning/下壓力.md]",
+                    "hint": "通常 → 加下壓力（前後各加 1-2 級）",
+                    "driving": ['先跑 1-2 圈暖胎、用 S 形蛇行加溫'],
+                })
+
+    # === 缺陷 7：出彎 yaw 過衝（差速器 accel 過鬆）===
+    # 與「出彎後輪左右 slip Δ 過大」（缺陷 1）方向一致但獨立——
+    # 即使左右 slip Δ 沒到門檻，整體 yaw 過衝也是 diff 太鬆的訊號。
+    if corners["count"] >= 4 and corners.get("yaw_overshoot_corners", 0) >= 3:
+        yo = corners["yaw_overshoot_corners"]
+        if yo / corners["count"] >= 0.25:
+            findings.append({
+                "severity": "🟡",
+                "title": (f'出彎 yaw 過衝 {yo}/{corners["count"]} 個彎'
+                          f'（出彎角速度 > 入彎 1.5×）'),
+                "wiki": "[tuning/差速器.md] 後差加速鎖定",
+                "hint": "通常 → 加後 diff accel 鎖定 5-10%（讓出彎兩後輪更同步、抑制 yaw 過衝）",
+                "driving": ['出彎油門更線性、避免一次踩到底激發 yaw'],
+            })
+
+    # === 缺陷 10：出彎「彎太多 + 加油太早」（[wiki/driving/賽車線與彎道基礎.md] 常見錯）===
+    # 過 apex 後仍在大角度（≥ 50% 該彎 max steer）已踩半油以上 → 阻礙加速、RWD 易甩。
+    # 純駕駛習慣問題（與 build 無關），改變動作就能修。
+    if (corners["count"] >= 4
+        and corners.get("exit_overturn_corners", 0) >= 3
+        and corners["exit_overturn_corners"] / corners["count"] >= EXIT_OVERTURN_CORNER_PCT):
+        oc = corners["exit_overturn_corners"]
+        is_rwd_or_awd = drivetrain_type in (1, 2)
+        # RWD 因甩尾風險嚴重度高一級
+        sev = "🟡" if is_rwd_or_awd else "ℹ️"
+        rwd_note = "（RWD：尤其甩尾風險）" if drivetrain_type == 1 else ""
+        findings.append({
+            "severity": sev,
+            "title": (f'出彎彎太多 + 加油太早 {oc}/{corners["count"]} 個彎'
+                      f'（仍在 ≥ 50% max 轉向就已踩半油）{rwd_note}'),
+            "wiki": "[driving/賽車線與彎道基礎.md] 過 apex 後不要彎太多 + "
+                    "[driving/RWD駕駛技巧.md] 過彎油門管理",
+            "hint": "純駕駛習慣：過 apex 後**同時放鬆方向盤 + 加油**，視覺瞄向**彎外**而非內側",
+            "driving": [
+                '過 apex 後「先放方向盤再加油」——不要邊轉邊加',
+                '視線瞄向出彎外側（不是內側）——眼睛帶手',
+            ],
+        })
+
+    # === 缺陷 6：S 彎過渡（快速 L↔R）有問題（三段彎道診斷.md:133）===
+    if (corners.get("s_transition_count", 0) >= 2 and
+        corners.get("s_transition_trouble_count", 0) >= 2):
+        st = corners["s_transition_count"]
+        tr = corners["s_transition_trouble_count"]
+        findings.append({
+            "severity": "🟡",
+            "title": f'S 彎過渡 {tr}/{st} 對有 under/oversteer',
+            "wiki": "[tuning/三段彎道診斷.md:133] 阻尼與 ARB",
+            # 方向取決於主症狀（US 或 OS），不直接給；分析師結合該場主症狀判斷
+            "hint": "依主症狀方向（看其他 finding）同步調 ARB 與 bump/rebound 阻尼平衡",
+            "driving": ['過渡彎間方向盤切換更線性、避免反向打死'],
+        })
+
+    # === 缺陷 4：煞車鎖死前後軸比 → 煞車平衡（煞車調校.md）===
+    # 煞車期間若前鎖死遠多於後鎖死 → 偏前太多 → 滑桿往後
+    # 反之 → 偏後太多 → 滑桿往前
+    # 至少要有意義的煞車量才作判斷（>= 60 packet ≈ 1s）
+    if brake_balance["braking_packets"] >= 60:
+        f_lock = brake_balance["front_lockup_packets"]
+        r_lock = brake_balance["rear_lockup_packets"]
+        ratio = brake_balance["front_rear_ratio"]
+        # 至少有 20 packet 鎖死才值得提（避免微量鎖死打擾）
+        if (f_lock + r_lock) >= 20:
+            if ratio >= 3 and f_lock >= 20:
+                findings.append({
+                    "severity": "🟡",
+                    "title": (f'煞車前軸鎖死 {f_lock} packet，後軸 {r_lock}（比 {ratio:.1f}:1，'
+                              f'煞車偏前 / 前胎飽和）'),
+                    "wiki": "[tuning/煞車調校.md] 煞車平衡 + [tuning/四輪定位.md] caster",
+                    "hint": "通常 → 煞車平衡往後 2-3% / 加 caster 0.3-0.5° / 硬前懸吊（已飽和才適用）",
+                    "driving": ['煞車力道前期更線性、避免一次到底'],
+                })
+            elif ratio > 0 and ratio <= 0.4 and r_lock >= 20:
+                findings.append({
+                    "severity": "🟡",
+                    "title": (f'煞車後軸鎖死 {r_lock} packet，前軸 {f_lock}（比 1:{1/max(ratio,0.001):.1f}，'
+                              f'煞車偏後 / 入彎甩尾風險）'),
+                    "wiki": "[tuning/煞車調校.md] 煞車平衡 + [tuning/差速器.md] 後差減速",
+                    "hint": "通常 → 煞車平衡往前 2-3% / 加後 diff decel 鎖定 10-20%",
+                    "driving": ['trail brake 收得更快、減少入彎時殘留煞車'],
+                })
+
+    # === 缺陷 11：依 PI 級的橫向 G 力達標檢查（[wiki/upgrades/輪胎配件.md]）===
+    # 把 build 的「操控健康度」與駕駛技術分離 — G 力達標主要取決於 build（胎質 / 胎寬 / 減重 /
+    # 下壓力），玩家技術只在彎中能不能逼到極限這層才介入。低於下限 → 多半是 build 問題。
+    if pi_grip is not None and pi_grip["status"] == "under":
+        gap = pi_grip["gap"]
+        # 嚴重度：差距 > 0.3 G 視為大缺口（明顯升一級胎），否則 🟡
+        sev = "🔴" if gap > 0.3 else "🟡"
+        hi_str = f'{pi_grip["expected_hi"]:.1f}' if pi_grip["expected_hi"] is not None else '—'
+        findings.append({
+            "severity": sev,
+            "title": (f'{pi_grip["class_label"]} 級橫向 G 力未達標：'
+                      f'實測 {pi_grip["observed"]:.2f} G / 目標 {pi_grip["expected_lo"]:.1f}-{hi_str} G'
+                      f'（差 {gap:.2f} G）'),
+            "wiki": "[upgrades/輪胎配件.md] 依 PI 級的橫向 G 力指標 + Mustuff124 G 力指標表",
+            "hint": "通常 → 升輪胎（拉力胎→半熱熔→熱熔）或減重；先別急著升馬力。"
+                    "若已用最強胎仍未達標，再看 [tuning/下壓力.md] 是否能加更多。",
+            "driving": ['彎中敢踩到極限——若實測接近目標下限，可能是駕駛保守而非 build 不足'],
+        })
+    # （status == "over" 不視為問題：表示 build 操控過剩，玩家可考慮減重換更激進取向；
+    # 但不會被歸類為「缺陷」。這個資訊在 Section 6 的詳細表中會看到。）
+
+    # === 缺陷 9：Launch 階段三檔仍打滑（[wiki/driving/RWD駕駛技巧.md]）===
+    # gear 1-2 打滑是 RWD/AWD 起步常態，不視為問題；
+    # **gear 3 仍 ≥ 30% packet 打滑** → 後胎抓地不夠（HokiHoshi 直接指向 build 問題）。
+    if launch is not None and launch["gear3_problem"]:
+        # 找 gear 3 的具體數據
+        g3 = next((g for g in launch["per_gear"] if g["gear"] == 3), None)
+        if g3 is not None:
+            findings.append({
+                "severity": "🟡",
+                "title": (f'起步三檔仍打滑（{g3["loss_pct"]:.0f}% packet slip > 1.0，'
+                          f'max slip {g3["max_slip"]:.2f}）→ 後胎抓地不夠'),
+                "wiki": "[upgrades/輪胎配件.md] 胎質 / 後胎寬 + [driving/RWD駕駛技巧.md] § Launch",
+                "hint": "通常 → 升一級胎質（Sport→Rally→Semi-slick→Slick）或加大後胎寬；"
+                        "若胎已最強，再考慮 [upgrades/改造選擇.md] 動力曲線（單渦輪在低檔易爆衝）",
+                "driving": [],
+            })
+
+    # === 缺陷 B1：下壓力 / aero 不足偵測（下壓力.md）===
+    # 高速段（>200 km/h）累積 ≥ 5s 且側向 G p95 顯著低於中速段 p95（< 60%）
+    # → 提示「可能下壓力不足」（也可能是高速彎駕駛偏保守，不下死論）
+    # 中速段 p95 必須 ≥ 1.5G 才有可比性（否則低速能力本身就不行，不能用此指標）
+    if (aero["high_packets"] >= 300  # 5s @ 60 Hz
+        and aero["mid_p95_lat_g"] is not None
+        and aero["mid_p95_lat_g"] >= 1.5
+        and aero["high_p95_lat_g"] is not None
+        and aero["high_p95_lat_g"] < aero["mid_p95_lat_g"] * 0.6):
+        findings.append({
+            "severity": "🟡",
+            "title": (f'高速段（>200 km/h, {aero["high_packets"]/60:.1f}s）'
+                      f'側向 G p95 = {aero["high_p95_lat_g"]:.2f}'
+                      f'（中速段 {aero["mid_p95_lat_g"]:.2f}，可能下壓力不足或高速彎駕駛保守）'),
+            "wiki": "[tuning/下壓力.md]",
+            "hint": "通常 → 加前後下壓力（先各加 10-20%）；若已最大或追求尾速 → 改 build 取向",
+            "driving": ['高速彎敢踩到極限，目前可能還沒摸到車的物理上限'],
+        })
 
     if tires["overall"] and tires["overall"]["fr_delta"] > 10:
         d = tires["overall"]["fr_delta"]
         findings.append({
             "severity": "🔴",
             "title": f'前胎過熱（推頭傾向） +{d:.0f}°C',
-            "tuning": _understeer_tuning_for_drivetrain(drivetrain_type),
+            "wiki": "[tuning/胎壓.md] + [tuning/三段彎道診斷.md] 整體 US",
+            "hint": "通常與整體推頭同方向：前胎壓 / 前 ARB / 前 camber",
             "driving": ['入彎再慢 3-5 km/h，出彎晚一點再給油'],
         })
     elif tires["overall"] and tires["overall"]["fr_delta"] < -10:
@@ -1538,7 +2591,8 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         findings.append({
             "severity": "🔴",
             "title": f'後胎過熱（轉向過度傾向） +{d:.0f}°C',
-            "tuning": _oversteer_tuning_for_drivetrain(drivetrain_type),
+            "wiki": "[tuning/胎壓.md] + [tuning/三段彎道診斷.md] 整體 OS",
+            "hint": "通常與整體 OS 同方向：後胎壓 / 後 ARB / 後 camber；RWD 注意是 power OS",
             "driving": ['出彎別太早全油門，給油更線性'],
         })
     if slip["per_segment"]:
@@ -1547,23 +2601,24 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
             findings.append({
                 "severity": "🔴",
                 "title": f'前輪滑移 ≈ {statistics.mean(ratios):.1f}× 後輪（推頭證據）',
-                "tuning": [],  # 與「前胎過熱」處方重複，避免 TL;DR 雜訊
+                "wiki": "—（與「前胎過熱」/「整體推頭」同方向）",
+                "hint": "",
                 "driving": [],
             })
         elif ratios and statistics.mean(ratios) < 0.7:
             findings.append({
                 "severity": "🔴",
                 "title": f'後輪滑移 ≈ {1 / statistics.mean(ratios):.1f}× 前輪（轉向過度證據）',
-                "tuning": [], "driving": [],
+                "wiki": "—（與「後胎過熱」/「整體 OS」同方向）",
+                "hint": "",
+                "driving": [],
             })
     if susp["total_bottom_packets"] > 30:
-        # Identify which corner bottoms most
-        per_corner = {c: sum(r["bottom_count"] for r in susp["per_segment"])
-                     for c in ['fl_max', 'fr_max', 'rl_max', 'rr_max']}
         findings.append({
             "severity": "🟡",
             "title": f'懸吊觸底 {susp["total_bottom_packets"]} 個 packet（彈簧過軟 / 車高過低）',
-            "tuning": ['拉硬觸底那角彈簧 5-10%', '或拉高該角車高 0.5-1 cm', '或加大壓縮阻尼 1-2 級'],
+            "wiki": "[tuning/彈簧與車高.md] + [tuning/阻尼.md] bump",
+            "hint": "通常 → 拉硬觸底那角彈簧 5-10% / 拉高該角車高 0.5-1 cm / 加 bump 阻尼 1-2 級",
             "driving": [],
         })
     if drvtrn["shift_loss_rpm"] > 500:
@@ -1572,8 +2627,26 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         findings.append({
             "severity": "🟡",
             "title": f'換檔太早 {drvtrn["shift_loss_rpm"]:.0f} RPM（直線丟動力）{basis_note}',
-            "tuning": ['拉長個別齒比（蓋過去峰值馬力 RPM）', '或拉長最終傳動 (Final Drive 往 Long 方向)'],
+            "wiki": "[tuning/齒比.md]",
+            "hint": "通常 → 拉長個別齒比（蓋過峰值馬力 RPM）或拉長 Final Drive（往 Long）",
             "driving": [f'手排：晚一點換檔，等到聲音接近 {drvtrn["ideal_shift"]:.0f} RPM 再換'],
+        })
+
+    # === 缺陷 8：換檔後落點掉出 power band（齒比間距太寬）===
+    # 換 N→N+1 後 RPM 穩定到 < power_band_start，代表這個檔位的銜接掉到動力死區
+    # 與「換檔太早」獨立——即使換檔點正確、若 ratio 間距太寬也會落到死區
+    if drvtrn.get("post_shift_count", 0) >= 5 and drvtrn.get("post_shift_dead_pct", 0) >= 30:
+        dp = drvtrn["post_shift_dead_pct"]
+        n_shift = drvtrn["post_shift_count"]
+        avg_landing = drvtrn["post_shift_avg_rpm"]
+        findings.append({
+            "severity": "🟡",
+            "title": (f'換檔後 {dp:.0f}% 落到 power band 外'
+                      f'（{n_shift} 次換檔 / 平均落點 {avg_landing:.0f} RPM '
+                      f'/ band 起點 {drvtrn["power_band_start"]:.0f} RPM，齒比間距太寬）'),
+            "wiki": "[tuning/齒比.md]",
+            "hint": "通常 → 縮短個別齒比間距（把 N→N+1 之間距拉近）或縮短 Final Drive（往 Short）",
+            "driving": [],
         })
     if wheelspin_pkts > 60:
         findings.append(_wheelspin_finding(wheelspin_pkts, drivetrain_type))
@@ -1585,13 +2658,17 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
             findings.append({
                 "severity": "ℹ️",
                 "title": f'本場 {corners["left_count"]}/{corners["count"]} 個彎為左彎 → 右前胎偏熱（{tires["overall"]["lr_front_delta"]:+.1f}°C）屬賽道特性，**非調校問題**',
-                "tuning": [], "driving": [],
+                "wiki": "—（純診斷，無處方）",
+                "hint": "",
+                "driving": [],
             })
         elif corners["track_bias"] == "right" and tires["overall"] and tires["overall"]["lr_front_delta"] > 3:
             findings.append({
                 "severity": "ℹ️",
                 "title": f'本場 {corners["right_count"]}/{corners["count"]} 個彎為右彎 → 左前胎偏熱（{tires["overall"]["lr_front_delta"]:+.1f}°C）屬賽道特性，**非調校問題**',
-                "tuning": [], "driving": [],
+                "wiki": "—（純診斷，無處方）",
+                "hint": "",
+                "driving": [],
             })
 
         # Slow throttle reopen → driver too cautious on exit (only flag when meaningful)
@@ -1599,26 +2676,20 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         if delay is not None and delay > 1.0 and corners["corners_with_lift"] >= 3:
             findings.append({
                 "severity": "🟡",
-                "title": f'有收油的 {corners["corners_with_lift"]} 個彎中，平均出彎油門重踩要 {delay:.2f}s → 出彎略保守',
-                "tuning": [],
+                "title": f'有收油的 {corners["corners_with_lift"]} 個彎中，平均出彎油門重踩要 {delay:.2f}s（出彎略保守）',
+                "wiki": "[driving/賽車線與彎道基礎.md]",
+                "hint": "駕駛問題優先；若拉不回時間考慮提升出彎抓地（後 ARB 軟、後胎壓降）",
                 "driving": [f'彎心後早 0.2-0.3s 把油門踩回去（目前 {delay:.2f}s → ~{max(0.3, delay - 0.3):.2f}s）'],
             })
 
         # Many corners showing wheelspin on exit
         if corners["wheelspin_exit_corners"] > corners["count"] * 0.3:
             pct = corners["wheelspin_exit_corners"] / corners["count"] * 100
-            # RWD: power oversteer prescriptions; AWD: forward power split + diff;
-            # FWD: rear wheelspin is rare and usually a symptom not root cause.
-            if drivetrain_type == 1:
-                tuning = ['後差加速鎖定降 5-10%', '軟後防傾桿 1 級', '降後胎壓 1 psi']
-            elif drivetrain_type == 2:
-                tuning = ['後差加速鎖定降 5-10%', '動力分配往前移 5-10%']
-            else:
-                tuning = ['降後胎壓 1 psi']
             findings.append({
                 "severity": "🟡",
-                "title": f'{corners["wheelspin_exit_corners"]}/{corners["count"]} 個彎（{pct:.0f}%）出彎時後輪打滑 → 出彎給油過猛 / 差速器過硬',
-                "tuning": tuning,
+                "title": f'{corners["wheelspin_exit_corners"]}/{corners["count"]} 個彎（{pct:.0f}%）出彎時後輪打滑（出彎給油過猛 / 差速器過硬）',
+                "wiki": "[tuning/差速器.md] + [driving/賽車線與彎道基礎.md]",
+                "hint": "RWD：節流量管理優先；AWD：後 diff accel 鬆 / 動力分配往前；FWD：通常非根因",
                 "driving": ['出彎油門更線性，前 0.5s 控制在 70% 不要全踩'],
             })
 
@@ -1628,7 +2699,8 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
             findings.append({
                 "severity": "🟡",
                 "title": f'{corners["understeering_corners"]}/{corners["count"]} 個彎（{pct:.0f}%）前輪滑移 > 後輪 1.5×（**彎中**推頭）',
-                "tuning": [],  # 與整體推頭處方重複
+                "wiki": "—（與「整體推頭」/「中段 US 主導」同方向）",
+                "hint": "",
                 "driving": [],
             })
 
@@ -1638,15 +2710,18 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         if crash_count > 2:
             findings.append({
                 "severity": "🟡",
-                "title": f'撞車 {crash_count} 次（共 {len(crash_excluded)} packet ≈ {excluded_s:.1f}s 從統計排除）→ 撞太多了',
-                "tuning": [],
+                "title": f'撞車 {crash_count} 次（共 {len(crash_excluded)} packet ≈ {excluded_s:.1f}s 從統計排除，撞太多了）',
+                "wiki": "[driving/賽車線與彎道基礎.md]",
+                "hint": "撞車是駕駛問題不是調校問題——先把路線/煞車點/入彎速度做穩",
                 "driving": ['撞車多半是入彎太用力、路線太靠外側、或不熟賽道。先放慢 5-10 km/h 練線，熟了再加速'],
             })
         else:
             findings.append({
                 "severity": "ℹ️",
                 "title": f'撞車 {crash_count} 次（共 {len(crash_excluded)} packet ≈ {excluded_s:.1f}s 從統計排除，G-force / decel / 觸底已不含）',
-                "tuning": [], "driving": [],
+                "wiki": "—（已從統計排除，無處方）",
+                "hint": "",
+                "driving": [],
             })
 
     # Brake anomaly: pure diagnostic, no prescriptions.
@@ -1659,13 +2734,17 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
             findings.append({
                 "severity": "⚠️",
                 "title": f'Brake 欄位全 0，但實測最大減速 {inferred_decel_g:.2f}G（速度反推）→ FH5 Data Out 異常，煞車輸入分析不可信',
-                "tuning": [], "driving": [],
+                "wiki": "[settings/駕駛輔助與輸入設定.md]（檢查 Braking Assist 是否開啟）",
+                "hint": "資料異常，無調校處方；下次重跑前確認 Braking Assist 關閉",
+                "driving": [],
             })
         else:
             findings.append({
                 "severity": "ℹ️",
                 "title": 'Brake 欄位全 0 且無明顯減速 → 可能本場真的沒煞車，或 Brake 輸入未傳送',
-                "tuning": [], "driving": [],
+                "wiki": "—（純診斷）",
+                "hint": "",
+                "driving": [],
             })
 
     # === Build markdown ===
@@ -1673,72 +2752,70 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     o.append('# 賽事摘要')
     o.append('')
     crash_note = f'，{len(crash_excluded)} 撞車' if crash_count > 0 else ''
-    o.append(f'> 自動產生於 raw.csv ({len(rows)} 筆 → {len(valid)} 有效；排除 {len(rows) - len(pre_crash_valid)} IsRaceOn=0/rewind{crash_note}）。資料源：[meta.json](meta.json) / [raw.csv](raw.csv)')
+    n_race_off = sum(1 for r in rows if r['IsRaceOn'] != '1')
+    super_note = f'、{n_superseded} 已被後續 redo 取代' if n_superseded > 0 else ''
+    o.append(f'> 自動產生於 raw.csv ({len(rows)} 筆 → {len(valid)} 有效；排除 {n_race_off} IsRaceOn=0{super_note}{crash_note}）。資料源：[meta.json](meta.json) / [raw.csv](raw.csv)')
+    if n_superseded > 0:
+        o.append('>')
+        o.append(f'> ⚠️ **本場含 {meta["rewinds"]["count"]} 次 rewind**——已自動排除 **{n_superseded} packet ≈ {n_superseded/60:.1f}s** 你 rewind 前的失敗嘗試。分析以你最終定案的線為準（每個 CRT 時刻只保留錄製時間最晚的 packet）。')
+    o.append('>')
+    o.append('> ℹ️ **US/OS 偵測方法**：用 yaw-rate 法（比較實際 yaw 與物理預期 `lat_acc / speed`），對所有 PI 級／速度通用，比舊 slip-angle 比值法精準。slip angle 作為「胎是否接近 grip 極限」的次級確認信號。')
     o.append('')
 
     # --- Headline ---
     o.append('## TL;DR')
     o.append('')
     if findings:
-        # --- Symptom list ---
-        o.append('### 症狀')
-        o.append('')
-        for f_ in findings:
-            o.append(f'- {f_["severity"]} {f_["title"]}')
-        o.append('')
-
-        # --- Aggregate prescriptions across all findings, deduplicated, severity-ordered ---
+        # 排序：嚴重度從高到低
         sev_order = {"⛔": 0, "🔴": 1, "🟡": 2, "⚠️": 3, "ℹ️": 4}
         sorted_findings = sorted(findings, key=lambda f_: sev_order.get(f_["severity"], 9))
 
-        seen_canon: set[str] = set()
-        seen_groups: set[str] = set()
-        tuning_actions: list[tuple[str, str]] = []  # (action, source title)
+        # === 症狀清單（觀測 + wiki 指引；不下死論的調校處方）===
+        # 設計原則：summarize 是「觀測層」——列出客觀症狀並指向 wiki 章節，附一
+        # 句話「通常方向」作為粗略指引。實際處方由 race-analyst 結合車況、當前
+        # tune、駕駛軌跡綜合判斷後才下。
+        o.append('### 症狀（依嚴重度排序）')
+        o.append('')
+        o.append('> summarize 的職責是**觀測 + 指向 wiki**，不直接給最終調校處方。'
+                 '具體該改什麼要結合車輛資料、當前 tune、駕駛技術綜合判斷——'
+                 '請用 `/race-analyst` 取得完整建議。')
+        o.append('')
+        # title 在第一行；hint 換行至第二行（兩個尾隨空格 = Markdown 強制換行）。
+        # wiki 對照不放 TL;DR——race-analyst 會依症狀關鍵字自行查 Phase 2 的對應
+        # 表，TL;DR 留乾淨；wiki 路徑仍存在 finding dict 內供日後其他段落引用。
         for f_ in sorted_findings:
-            # Defense in depth: even if a finding accidentally lists an
-            # action that's incompatible with this drivetrain (e.g., RWD getting
-            # 「動力分配往前移」), the guard drops it here.
-            for action in _filter_actions_by_drivetrain(f_.get("tuning", []), drivetrain_type):
-                canon = _canonical_action_key(action)
-                # Dedup：相同語義（含括號補充差異）只保留首次。
-                if canon in seen_canon:
-                    continue
-                # 衝突仲裁：同 _CONFLICT_GROUPS 組內最多一條，依 severity 先到先得。
-                # 例：推頭主症狀（⛔）已加「動力分配往後移」，後輪打滑（🟡）的
-                # 「動力分配往前移」會被跳過，避免 TL;DR 印出互斥處方。
-                group = _CONFLICT_GROUPS.get(canon)
-                if group and group in seen_groups:
-                    continue
-                tuning_actions.append((action, f_["title"]))
-                seen_canon.add(canon)
-                if group:
-                    seen_groups.add(group)
+            title_line = f'- {f_["severity"]} **{f_["title"]}**'
+            hint_str = f_.get("hint", "")
+            if hint_str:
+                o.append(title_line + '  ')
+                o.append(f'  💡 {hint_str}')
+            else:
+                o.append(title_line)
+        o.append('')
 
+        # === 駕駛建議（保留：universal、低風險、玩家可立刻試）===
         seen_d: set[str] = set()
-        driving_actions: list[tuple[str, str]] = []
+        driving_actions: list[str] = []
         for f_ in sorted_findings:
             for action in f_.get("driving", []):
-                if action not in seen_d:
-                    driving_actions.append((action, f_["title"]))
+                if action and action not in seen_d:
+                    driving_actions.append(action)
                     seen_d.add(action)
-
-        if tuning_actions:
-            o.append('### 🔧 調校建議（去 Garage 改，**一次只動一個**）')
-            o.append('')
-            for i, (action, source) in enumerate(tuning_actions, 1):
-                o.append(f'{i}. {action}')
-            o.append('')
 
         if driving_actions:
             o.append('### 🎮 駕駛建議（不需改車，下次直接試）')
             o.append('')
-            for i, (action, source) in enumerate(driving_actions, 1):
+            for i, action in enumerate(driving_actions, 1):
                 o.append(f'{i}. {action}')
             o.append('')
 
-        if not tuning_actions and not driving_actions:
-            o.append('（本場主要為資料異常或診斷項目，沒有對應的調校/駕駛處方）')
-            o.append('')
+        # === 接下來：明確指向 race-analyst ===
+        o.append('### 📍 接下來')
+        o.append('')
+        o.append('上述「💡 通常方向」**僅為粗略指引**，不要直接照抄。實際調校建議請用 '
+                 '`/race-analyst`（會綜合車輛用途、當前 tune、駕駛軌跡、wiki 處方表後'
+                 '給出**排優先順序、互不衝突**的具體動作）。')
+        o.append('')
     else:
         o.append('✅ 沒有偵測到明顯異常，這場開得相當乾淨。')
         o.append('')
@@ -1751,7 +2828,18 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     o.append(f'| 賽事類型 | **{event_type}**（{"多圈" if is_lapped else "單趟（衝刺/街頭/直線）"}） |')
     o.append(f'| 開始時間 | {meta["started_at"]} |')
     o.append(f'| 持續時間 | {meta["duration_seconds"]:.1f} 秒 |')
-    o.append(f'| 車輛 ordinal | {meta["car"]["ordinal"]} (PI {meta["car"]["performance_index"]}, class {meta["car"]["class"]}) |')
+    car_db = meta["car"].get("db") or {}
+    car_label = car_db.get("name") or f'ordinal {meta["car"]["ordinal"]}'
+    name_str = car_db.get("name") or ""
+    car_extras = []
+    if car_db.get("manufacturer") and car_db["manufacturer"] not in name_str:
+        car_extras.append(car_db["manufacturer"])
+    if car_db.get("model_year") and str(car_db["model_year"]) not in name_str:
+        car_extras.append(str(car_db["model_year"]))
+    if car_db.get("purpose"):
+        car_extras.append(f'用途：{car_db["purpose"]}')
+    extras_str = f'（{"，".join(car_extras)}）' if car_extras else ''
+    o.append(f'| 車輛 | **{car_label}**{extras_str} — ordinal {meta["car"]["ordinal"]}, PI {meta["car"]["performance_index"]}, class {meta["car"]["class"]} |')
     o.append(f'| 傳動 | {drivetrain_name} |')
     o.append(f'| 引擎 | {meta["car"]["num_cylinders"]} 缸，紅線 {drvtrn["engine_max"]:.0f} RPM |')
     if is_lapped:
@@ -1802,45 +2890,45 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         o.append('')
 
     # Slip detail
-    o.append('### 2. 滑移分析（推頭 / 轉向過度）')
+    o.append('### 2. 滑移分析（grip 使用率）')
     o.append('')
     o.append('TireSlipRatio：縱向滑移（加速/煞車時輪轉速 vs 車速）。0 = 100% 抓地，>1.0 = 失抓。')
-    o.append('TireSlipAngle：橫向滑移（過彎時輪指向 vs 實際前進方向）。')
+    o.append('TireSlipAngle：橫向滑移，FH5 為 normalized 值——**>1.0 表示已失去 grip**（grip 使用率超過極限）。')
     o.append('')
     o.extend(fmt_slip_table(slip))
     o.append('')
-    o.append(f'**推頭瞬間**（前輪 slip angle > 1.5× 後輪）：共 {slip["understeer_count"]} 個 packet')
-    if slip["understeer_top"]:
-        o.append('')
-        o.append('| 段 | 賽事時間 (s) | 前輪角 | 後輪角 | 速度 (km/h) |')
-        o.append('|----|-------------|-------|-------|-------------|')
-        for crt, label, fs, rs, kmh in slip["understeer_top"]:
-            o.append(f'| {label} | {crt:.2f} | {fs:.2f} | {rs:.2f} | {kmh:.0f} |')
-    o.append('')
-    o.append(f'**轉向過度瞬間**（後輪 slip angle > 1.5× 前輪）：共 {slip["oversteer_count"]} 個 packet')
-    if slip["oversteer_top"]:
-        o.append('')
-        o.append('| 段 | 賽事時間 (s) | 前輪角 | 後輪角 | 速度 (km/h) |')
-        o.append('|----|-------------|-------|-------|-------------|')
-        for crt, label, fs, rs, kmh in slip["oversteer_top"]:
-            o.append(f'| {label} | {crt:.2f} | {fs:.2f} | {rs:.2f} | {kmh:.0f} |')
+    o.append('> 推頭 / 轉向過度判定**已改用 yaw-rate 法**（見 § 8 過彎分析），更準確：')
+    o.append('> 比較實際 yaw rate vs 物理預期 yaw rate（= lat_acc / speed），不再用 slip angle 比值')
+    o.append('> （舊邏輯把正常 turn-in 幾何誤判為推頭）。')
     o.append('')
 
     # Suspension detail
     o.append('### 3. 懸吊行程')
     o.append('')
-    o.append('NormalizedSuspensionTravel：0 = 完全伸長，1.0 = 完全壓縮（觸底）。長期 0.7-0.85 是健康範圍。')
+    o.append('NormalizedSuspensionTravel：0 = 完全伸長，1.0 = 完全壓縮（觸底）。')
+    o.append('wiki 健康區：硬核指南 **15-85%**、HokiHoshi **20-80%**（兩派方向一致——全程不該到頂或到底）。')
     o.append('')
     o.extend(fmt_suspension_table(susp))
+    o.append('')
+    o.append('**在 15-85% 健康範圍佔比 + std 振幅**（對照 wiki/tuning/遙測使用指南.md）：')
+    o.append('')
+    o.extend(fmt_suspension_range_table(susp))
     o.append('')
     if susp["total_bottom_packets"] > 0:
         o.append(f'**觸底總計**：{susp["total_bottom_packets"]} 個 packet ≈ {susp["total_bottom_packets"] / 60:.1f}s 觸底時間')
     o.append('')
     o.append('**判讀指南**：')
-    o.append('- 任一輪持續 > 0.95 → 該角彈簧過軟或車高過低')
+    o.append('- 任一輪持續 > 0.95 → 該角彈簧過軟或車高過低（→ 拉硬彈簧 5-10% / 拉高車高 0.5-1 cm / 加大壓縮阻尼 1-2 級）')
     o.append('- 平均 < 0.5 → 彈簧過硬，浪費抓地（行程沒用滿）')
+    o.append('- **健康範圍佔比 < 60%**（表中粗體）→ 該角行程偏離 [0.15, 0.85]；若 max 高 → 偏軟，若 avg 低 → 偏硬')
+    o.append('- **std > 0.10** → 平路波動明顯（紫粉色條視覺上「跳很大」）→ 該角彈簧偏軟，考慮調硬')
+    o.append('- **std < 0.03** → 波動極小，彈簧可能偏硬（也可能賽道平整，需主觀對照）')
     o.append('- 左右差距大 → 防傾桿 / 配重不平衡')
     o.append('- 前後差距大 → 配重偏前/後，考慮車高與彈簧比例')
+    o.append('- 車仍好開但 std 偏小 → HokiHoshi 提醒：依路況與駕駛風格略有差異，不必硬調')
+    o.append('')
+    o.append('> ⚠️ 「車身觸底」≠「懸掛觸底」：本表只能偵測**懸掛觸底**（NormalizedSuspensionTravel > 0.95）。'
+             '若駕駛感覺被路面「敲」、聽到車底碰撞聲但表中沒觸底，那是車身觸底——需抬高車身高度。')
     o.append('')
 
     # Drivetrain detail
@@ -1935,13 +3023,52 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     for g, pct in drvtrn["gear_distribution"].items():
         o.append(f'| {g} | {pct:.1f}% |')
     o.append('')
+    # === 缺陷 8：post-shift 落點 ===
+    if drvtrn.get("post_shift_count", 0) >= 1:
+        o.append('**換檔後落點**（缺陷 8：齒比間距驗證）：')
+        o.append('')
+        o.append(f'- upshift 次數：{drvtrn["post_shift_count"]}')
+        o.append(f'- 換檔後 0.2s RPM 平均：**{drvtrn["post_shift_avg_rpm"]:.0f}**')
+        o.append(f'- power band 起點：{drvtrn["power_band_start"]:.0f} RPM（基準: {drvtrn["power_band_basis"]}）')
+        o.append(f'- 落到 power band **外**比例：**{drvtrn["post_shift_dead_pct"]:.0f}%**')
+        if drvtrn["post_shift_dead_pct"] >= 30:
+            o.append('  → 齒比間距太寬，建議縮短個別齒比或縮短 Final Drive')
+        o.append('')
+
     o.append('**判讀指南**：')
     o.append('- 換檔點離理想 < 200 RPM：很好')
     o.append('- 換檔點低於理想 > 500 RPM：太早，丟動力（手排晚一點換、自排調整齒比）')
     o.append('- 換檔點**高於**理想 > 200 RPM：可能換檔太晚，過了功率帶反而失動力——縮短該檔齒比')
     o.append('- 在動力區時間 < 50%：齒比可能太密或太疏，沒讓引擎在甜蜜點工作')
     o.append('- 某檔位佔比異常低：可能可以略過該檔（常見於 6 檔車的 5 檔）')
+    o.append('- **換檔後落到 power band 外 > 30%** → 齒比間距太寬，銜接掉到動力死區')
     o.append('')
+
+    # === 4.4 Launch 階段（缺陷 9） ===
+    if launch is not None:
+        dt_label = DRIVETRAIN_NAMES.get(launch["drivetrain"], "?")
+        o.append(f'#### 4.4 Launch 起步分析（缺陷 9，{dt_label} 專屬）')
+        o.append('')
+        o.append(f'起步點：packet #{launch["start_packet"]}（前 {launch["distance_m"]:.0f} m / '
+                 f'{launch["duration_s"]:.1f} s 視窗）')
+        o.append('')
+        if launch["per_gear"]:
+            o.append('| 檔 | packet | WOT% | 平均後輪 slip | 最大 slip | slip > 1.0 比例 |')
+            o.append('|----|--------|------|---------------|-----------|----------------|')
+            for g in launch["per_gear"]:
+                bold = '**' if g["gear"] >= 3 and g["loss_pct"] >= LAUNCH_GEAR3_SLIP_PCT * 100 else ''
+                o.append(f'| {g["gear"]} | {g["packets"]} | {g["wot_pct"]:.0f}% | '
+                         f'{g["avg_slip"]:.2f} | {g["max_slip"]:.2f} | '
+                         f'{bold}{g["loss_pct"]:.0f}%{bold} |')
+            o.append('')
+        o.append('**判讀**（對照 [wiki/driving/RWD駕駛技巧.md] § Launch）：')
+        o.append('- gear 1-2 打滑是 RWD/AWD 起步**正常現象**，無需處理')
+        o.append('- **gear 3 仍 ≥ 30% packet slip > 1.0** → **後胎抓地不夠**（HokiHoshi 直接指向 build 問題）')
+        o.append('- WOT% < 80% 時表示玩家未持續全油，數據參考價值低（試試「就直接油門踩到底，看頂速升檔」）')
+        if launch["gear3_problem"]:
+            o.append('')
+            o.append('> ⚠️ 本場三檔仍打滑 — 升一級胎質或加大後胎寬，此症狀不是駕駛技術可解決的。')
+        o.append('')
 
     # Inputs
     o.append('### 5. 駕駛輸入')
@@ -2041,6 +3168,37 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         or gforces["max_lateral_g_with_crash"] - gforces["max_lateral_g_clean"] > 0.5):
         o.append('> 「含撞車」是資料中的最高瞬間（含撞牆 IMU 尖峰）；「排除撞車」才是車的真實能力——調校與駕駛建議應以「排除撞車」值為準。')
         o.append('')
+
+    # === 缺陷 11：依 PI 級的橫向 G 力達標檢查 ===
+    if pi_grip is not None:
+        o.append('**PI 級橫向 G 力達標檢查**（缺陷 11，對照 [wiki/upgrades/輪胎配件.md]）：')
+        o.append('')
+        source_str = {
+            "corners_top3": '彎內 top-3 peak 平均（穩健，已過濾撞擊／sweeper）',
+            "corners_max":  '彎內 max peak（彎數 < 3，無法用 top-3 平均）',
+            "raw":          '⚠️ raw IMU 最大值（無偵測到的彎，可能含微撞擊殘留）',
+        }.get(pi_grip["source"], '—')
+        if pi_grip["expected_lo"] is None:
+            # D / C 級無基準
+            o.append(f'- PI {pi_grip["pi"]} ({pi_grip["class_label"]} 級)：此級距無 G 力基準資料。')
+            o.append(f'- 實測：**{pi_grip["observed"]:.2f} G**（資料源：{source_str}）')
+        else:
+            hi_str = f'{pi_grip["expected_hi"]:.1f}' if pi_grip["expected_hi"] is not None else '—（無上限）'
+            status_str = {
+                "under":  f'❌ **未達標**（差 {pi_grip["gap"]:.2f} G）',
+                "target": '✅ 達標',
+                "over":   f'⬆️ 超標（高 {pi_grip["gap"]:.2f} G，操控過剩可考慮減重換更激進取向）',
+            }.get(pi_grip["status"], '—')
+            o.append(f'- PI {pi_grip["pi"]} ({pi_grip["class_label"]} 級) 目標：'
+                     f'**{pi_grip["expected_lo"]:.1f} ~ {hi_str} G**')
+            o.append(f'- 實測：**{pi_grip["observed"]:.2f} G**（資料源：{source_str}） → {status_str}')
+            if pi_grip.get("avg_peak") is not None:
+                o.append(f'- 參考：所有彎 peak G 平均 **{pi_grip["avg_peak"]:.2f} G**（反映常態 grip 使用率，非上限）')
+            if pi_grip["status"] == "under":
+                o.append('  → 通常 → 升輪胎或減重；若彎中駕駛已逼到極限再考慮其他方向')
+            elif pi_grip["status"] == "over" and pi_grip["gap"] > 1.0:
+                o.append('  → ⚠️ 差距 > 1 G 超出常理，可能含未過濾的微撞擊；建議交叉看「常態 G 使用率」是否也異常')
+        o.append('')
     o.append('**最大減速瞬間 top 8**（推測重煞車點，每筆抽 5 packet ≈ 83ms 視窗）：')
     o.append('')
     o.append('| 段 | 賽事時間 (s) | 減速 G | 速度變化 (km/h) |')
@@ -2048,6 +3206,27 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     for ev in decels[:8]:
         o.append(f'| Lap {ev["lap"]} | {ev["crt"]:.2f} | {ev["decel_g"]:.2f} | {ev["from_kmh"]:.0f}→{ev["to_kmh"]:.0f} |')
     o.append('')
+
+    # === 缺陷 4：煞車鎖死前後軸比 ===
+    if brake_balance["braking_packets"] >= 60:
+        bb = brake_balance
+        o.append('**煞車鎖死前後軸分布**（缺陷 4：煞車平衡診斷，對照 [wiki/tuning/煞車調校.md]）：')
+        o.append('')
+        o.append(f'- 煞車中 packet（Brake > 200）：**{bb["braking_packets"]}**')
+        o.append(f'- 前軸鎖死（FL 或 FR slip ratio > 1.0）：**{bb["front_lockup_packets"]} packet**')
+        o.append(f'- 後軸鎖死（RL 或 RR slip ratio > 1.0）：**{bb["rear_lockup_packets"]} packet**')
+        o.append(f'- 同時前後鎖死：{bb["both_packets"]} packet')
+        ratio = bb["front_rear_ratio"]
+        if ratio == float('inf'):
+            ratio_str = '前 only（後完全沒鎖）'
+        elif ratio == 0:
+            ratio_str = '後 only（前完全沒鎖）'
+        else:
+            ratio_str = f'**{ratio:.2f}:1**（前/後）'
+        o.append(f'- 前/後鎖死比：{ratio_str}')
+        o.append('')
+        o.append('> 比 ≥ 3:1 → 偏前太多（滑桿往後）；比 ≤ 0.4:1 → 偏後太多（滑桿往前）。')
+        o.append('')
 
     # Speed profile
     o.append('### 7. 速度與表面')
@@ -2058,7 +3237,34 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     o.append(f'- 速度標準差：{speed["stdev_kmh"]:.1f} km/h（變化幅度）')
     o.append(f'- Rumble strip 接觸：{surf["rumble_strip_seconds"]:.1f}s（壓 curb 時間）')
     o.append(f'- 最深水深：{surf["max_puddle_depth"]:.2f}（0=乾，1=最深）')
+    # === B2：路面類型分類 ===
+    surface_label = {"road": "🛣️ 公路",
+                     "rally": "🪨 拉力（混合）",
+                     "offroad": "🏜️ 越野"}.get(surf.get("surface_type", "road"), "—")
+    o.append(f'- **路面類型**：{surface_label}'
+             f'（avg surface rumble {surf.get("avg_surface_rumble", 0):.3f}, '
+             f'avg puddle {surf.get("avg_puddle_depth", 0):.3f}, '
+             f'rumble strip {surf.get("rumble_strip_pct", 0):.1f}%）')
+    o.append('  → 用途：套用對應的 wiki 修正表（[公路調校修正表] / [越野調校修正表]），'
+             '同時調整胎冷／curb-launch 等門檻')
     o.append('')
+
+    # === B1：下壓力 / aero 速度區段對比 ===
+    if aero["high_packets"] >= 60 or aero["mid_packets"] >= 600:
+        o.append('**速度區段側向 G**（缺陷 B1：aero / 下壓力診斷，對照 [wiki/tuning/下壓力.md]）：')
+        o.append('')
+        o.append('| 速度區間 | packet 數 | 時間 | p95 側向 G |')
+        o.append('|----------|-----------|------|------------|')
+        for label, pkts, p95 in [
+            ("低速 < 100 km/h", aero["low_packets"], aero["low_p95_lat_g"]),
+            ("中速 100-200 km/h", aero["mid_packets"], aero["mid_p95_lat_g"]),
+            ("高速 > 200 km/h", aero["high_packets"], aero["high_p95_lat_g"]),
+        ]:
+            p95_str = f'{p95:.2f}' if p95 is not None else '—'
+            o.append(f'| {label} | {pkts} | {pkts/60:.1f}s | {p95_str} |')
+        o.append('')
+        o.append('> 高速 p95 < 中速 p95 × 60% → 可能下壓力不足（也可能高速彎駕駛偏保守）')
+        o.append('')
 
     # === Section 8: Cornering ===
     o.append('### 8. 過彎分析')
@@ -2116,6 +3322,65 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         o.append('- **「整段推頭主導彎」少（如 5/26）但「推頭時間佔比」高（如 30%）** → 推頭發生在每個彎的特定 phase（通常是 entry/exit），而非整段——這仍是調校問題，但同時要看駕駛輸入')
         o.append('- **出彎打滑彎比例** > 30% → 差速器過硬 / 動力分配偏後 / 出彎習慣過猛（任三選一）')
         o.append('')
+
+        # === 缺陷 0：彎內三段（入彎/中段/出彎）症狀切片 ===
+        # 對應 wiki/tuning/三段彎道診斷.md 的不同處方表
+        o.append('**彎內三段（入彎/中段/出彎）症狀切片**（對照 [wiki/tuning/三段彎道診斷.md] 不同處方）：')
+        o.append('')
+        o.append('| 段 | US 主導彎 | OS 主導彎 | 該段 US 時間% | 該段 OS 時間% |')
+        o.append('|----|-----------|-----------|----------------|----------------|')
+        for ph_key, ph_label in [('entry', '入彎'), ('mid', '中段'), ('exit', '出彎')]:
+            o.append(f'| **{ph_label}** | '
+                    f'{corners[ph_key + "_us_corners"]}/{corners["count"]} | '
+                    f'{corners[ph_key + "_os_corners"]}/{corners["count"]} | '
+                    f'{corners[ph_key + "_us_time_pct"]:.1f}% | '
+                    f'{corners[ph_key + "_os_time_pct"]:.1f}% |')
+        o.append('')
+        o.append('> 「主導彎」= 該段該症狀佔該段 packet 數 ≥ 30% 且 ≥ 對手 2×。'
+                 '入彎與中段 US 主導 → 不同處方（看 [三段彎道診斷.md] 各段對策清單）。')
+        o.append('')
+
+        # === 缺陷 1：左右輪 slip ratio Δ（差速器鎖定診斷）===
+        o.append('**左右輪 slip ratio Δ**（缺陷 1：差速器鎖定診斷，對照 [wiki/tuning/差速器.md]）：')
+        o.append('')
+        o.append(f'- 出彎後輪 max Δ：**{corners["max_exit_lr_rear_delta"]:.2f}**（> 0.20 視為過大；異常彎 {corners["exit_diff_rear_loose_corners"]}/{corners["count"]}） → 後 diff accel')
+        o.append(f'- 出彎前輪 max Δ：**{corners["max_exit_lr_front_delta"]:.2f}**（> 0.20 視為過大；異常彎 {corners["exit_diff_front_loose_corners"]}/{corners["count"]}） → 前 diff accel (FWD/AWD)')
+        o.append(f'- 入彎後輪 Δ 過大彎：**{corners["entry_diff_rear_loose_corners"]}/{corners["count"]}** → 後 diff decel')
+        o.append('')
+
+        # === 缺陷 2：懸吊 d/dt（壓縮/回彈速度，阻尼診斷）===
+        o.append('**懸吊壓縮/回彈速度**（缺陷 2：阻尼診斷，門檻 0.10/packet ≈ 6/s）：')
+        o.append('')
+        o.append('| 項目 | 異常彎數 | max Δ |')
+        o.append('|------|----------|-------|')
+        o.append(f'| 入彎前懸吊壓縮 | {corners["entry_front_overcompress_corners"]}/{corners["count"]} | {corners["max_entry_front_compress_rate"]:.3f} |')
+        o.append(f'| 入彎後懸吊壓縮 | {corners["entry_rear_overcompress_corners"]}/{corners["count"]} | — |')
+        o.append(f'| 出彎前懸吊回彈 | {corners["exit_front_rebound_high_corners"]}/{corners["count"]} | — |')
+        o.append(f'| 出彎後懸吊回彈 | {corners["exit_rear_rebound_high_corners"]}/{corners["count"]} | {corners["max_exit_rear_rebound_rate"]:.3f} |')
+        o.append('')
+        o.append('> 入彎壓縮過快 → bump 阻尼不足 / 彈簧太軟。出彎回彈過快 → rebound 阻尼不足。')
+        o.append('')
+
+        # === 缺陷 3 / 6 / 7 / 10：過 curb / S 彎過渡 / yaw 過衝 / 出彎彎太多 ===
+        cl = corners.get("curb_launch_corners", 0)
+        st = corners.get("s_transition_count", 0)
+        st_t = corners.get("s_transition_trouble_count", 0)
+        yo = corners.get("yaw_overshoot_corners", 0)
+        ot = corners.get("exit_overturn_corners", 0)
+        if cl + st + yo + ot > 0:
+            o.append('**其他事件偵測**：')
+            o.append('')
+            if cl > 0:
+                o.append(f'- 過 curb 甩飛事件：**{cl} 次**（rumble strip + 懸吊 spike + yaw deviation） → 降 bump 阻尼')
+            if st > 0:
+                o.append(f'- S 彎過渡（< 1.0s 內 L↔R 切換）：**{st} 對**（其中 {st_t} 對有 us/os 異常）')
+            if yo > 0:
+                o.append(f'- 出彎 yaw 過衝（出彎 yaw > 入彎 1.5×）：**{yo}/{corners["count"]} 個彎** → 後 diff accel 鎖定不足')
+            if ot > 0:
+                tot = corners.get("exit_overturn_total_packets", 0)
+                o.append(f'- **出彎彎太多 + 加油太早**：**{ot}/{corners["count"]} 個彎**（共 {tot} packet ≈ {tot/60:.1f}s 過 apex 後仍 ≥ 50% max 轉向 + Accel ≥ 128） → 駕駛習慣，過 apex 後**先放方向盤再加油**')
+            o.append('')
+
         # Top 3 heaviest brake corners (notable but not exhaustive listing)
         if corners["count"] >= 3:
             heavy = sorted(corners["corners"], key=lambda c: -c["speed_drop_kmh"])[:3]
@@ -2179,7 +3444,9 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     o.append('')
     o.append('```')
     o.append(f'event_type    : {event_type}')
-    o.append(f'car           : ordinal={meta["car"]["ordinal"]} PI={meta["car"]["performance_index"]} class={meta["car"]["class"]} drivetrain={drivetrain_name} cyl={meta["car"]["num_cylinders"]}')
+    car_name_str = f' name="{car_db["name"]}"' if car_db.get("name") else ''
+    car_purpose_str = f' purpose={car_db["purpose"]}' if car_db.get("purpose") else ''
+    o.append(f'car           :{car_name_str} ordinal={meta["car"]["ordinal"]} PI={meta["car"]["performance_index"]} class={meta["car"]["class"]} drivetrain={drivetrain_name} cyl={meta["car"]["num_cylinders"]}{car_purpose_str}')
     if is_lapped:
         o.append(f'race          : {meta["race"]["total_laps"]} laps, best={meta["race"]["best_lap_seconds"]:.3f}s, last={meta["race"]["last_lap_seconds"]:.3f}s')
         lap_times = [F(p[-1], "LastLap") for lap, p in segments[0:0]]  # placeholder
@@ -2195,7 +3462,9 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         ratios = [r["fr_max"] / r["rr_max"] for r in slip["per_segment"] if r["rr_max"] > 0]
         if ratios:
             o.append(f'  slip_ratio  : front_max ≈ {statistics.mean([r["fr_max"] for r in slip["per_segment"]]):.3f}, rear_max ≈ {statistics.mean([r["rr_max"] for r in slip["per_segment"]]):.3f} (front/rear ≈ {statistics.mean(ratios):.2f}x)')
-    o.append(f'  understeer_moments: {slip["understeer_count"]}, oversteer_moments: {slip["oversteer_count"]}')
+    if total_corner_pkts > 0:
+        o.append(f'  understeer  : moderate+ {us_moderate} pkt ({us_moderate_pct:.1f}%), severe {us_severe} ({us_severe_pct:.1f}%), confirmed {us_confirmed_pct:.0f}%')
+        o.append(f'  oversteer   : moderate+ {os_moderate} pkt ({os_moderate_pct:.1f}%), severe {os_severe} ({os_severe_pct:.1f}%), confirmed {os_confirmed_pct:.0f}%')
     o.append(f'  suspension  : bottom_count={susp["total_bottom_packets"]}, max_per_corner=FL/{max(r["fl_max"] for r in susp["per_segment"]):.2f} FR/{max(r["fr_max"] for r in susp["per_segment"]):.2f} RL/{max(r["rl_max"] for r in susp["per_segment"]):.2f} RR/{max(r["rr_max"] for r in susp["per_segment"]):.2f}')
     if dyno is not None:
         o.append(f'  dyno        : peak_power_rpm={dyno["peak_power_rpm"]:.0f} (peak_power={dyno["peak_power"]:.0f}), peak_torque_rpm={dyno["peak_torque_rpm"]:.0f}')
@@ -2225,9 +3494,10 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
         o.append(f'                throttle_min_avg={corners["avg_throttle_min"]:.0f}/255, '
                 f'corners_with_lift={corners["corners_with_lift"]}/{corners["count"]}, '
                 f'avg_reopen_delay={delay_str}')
-        o.append(f'                understeering_corners={corners["understeering_corners"]}/{corners["count"]}, '
-                f'oversteering_corners={corners["oversteering_corners"]}/{corners["count"]}, '
-                f'wheelspin_exit_corners={corners["wheelspin_exit_corners"]}/{corners["count"]}')
+        o.append(f'                slip_us_corners={corners["understeering_corners"]}/{corners["count"]}, '
+                f'slip_os_corners={corners["oversteering_corners"]}/{corners["count"]} '
+                f'(legacy slip-ratio 法，僅供參考；正確 US/OS 看上方 yaw 法)')
+        o.append(f'                wheelspin_exit_corners={corners["wheelspin_exit_corners"]}/{corners["count"]}')
     o.append('```')
     o.append('')
 

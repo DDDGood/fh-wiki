@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO
 
+from . import cars as cardb
 from . import packet as pkt
 
 REWIND_THRESHOLD_S = 0.1  # backward jump in CurrentRaceTime (seconds) that counts as rewind
@@ -196,18 +197,29 @@ class Session:
         ended_at = datetime.now(timezone.utc).astimezone()
         duration = (ended_at - self.started_at).total_seconds()
         first = self._first_packet
+
+        car_block: dict = {
+            "ordinal": int(first.CarOrdinal) if first else None,
+            "class": int(first.CarClass) if first else None,
+            "performance_index": int(first.CarPerformanceIndex) if first else None,
+            "drivetrain_type": int(first.DrivetrainType) if first else None,
+            "num_cylinders": int(first.NumCylinders) if first else None,
+        }
+        # Enrich with hand-maintained car DB at <output_root>/../cars/{ordinal}.yml.
+        # Snapshot is frozen into this session's meta.json so future tune edits
+        # to the DB don't rewrite history.
+        if first is not None:
+            cars_dir = self.output_root.parent / "cars"
+            db_entry = cardb.load_car(int(first.CarOrdinal), cars_dir)
+            if db_entry is not None:
+                car_block["db"] = db_entry
+
         meta = {
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "ended_at": ended_at.isoformat(timespec="seconds"),
             "duration_seconds": round(duration, 3),
             "packet_count": self._packet_count,
-            "car": {
-                "ordinal": int(first.CarOrdinal) if first else None,
-                "class": int(first.CarClass) if first else None,
-                "performance_index": int(first.CarPerformanceIndex) if first else None,
-                "drivetrain_type": int(first.DrivetrainType) if first else None,
-                "num_cylinders": int(first.NumCylinders) if first else None,
-            },
+            "car": car_block,
             "race": {
                 # FH5 LapNumber is 0-indexed (lap 0 = first lap).
                 # max_lap_number observed + 1 = total laps reached.

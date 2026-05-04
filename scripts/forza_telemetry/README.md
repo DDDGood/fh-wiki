@@ -15,6 +15,7 @@
 - [賽事 vs 自由探索偵測](#賽事-vs-自由探索偵測)
 - [Rewind 偵測](#rewind-偵測)
 - [輸出格式](#輸出格式)
+- [車輛資料庫](#車輛資料庫)
 - [使用方式](#使用方式)
 - [CLI 參數](#cli-參數)
 - [FH5 行為怪癖（實證發現）](#fh5-行為怪癖實證發現)
@@ -34,7 +35,7 @@ FH5 內建 **Data Out** 功能可以透過 UDP 廣播車輛即時狀態（60 Hz�
 **這個工具的職責**：
 1. 監聽 UDP，自動辨識**何時**在賽事中（不錄自由探索）
 2. 自動分段：一場賽事 = 一個資料夾
-3. 標記倒轉資料（`is_rewind` 欄位），讓分析階段可以濾掉污染
+3. 標記倒轉資料（`is_rewind` 欄位）並保留全部 packet；分析階段（`summarize.py`）用 CRT-bucket dedupe 自動排除「rewind 前的失敗嘗試」，只保留玩家最終定案的線
 4. 輸出 LLM 友好的 metadata，省去手動標註
 
 ---
@@ -50,16 +51,23 @@ d:\Projects\Forza Horizon\
 │   ├── session.py        Session 資料夾、CSV writer、meta.json、rewind 偵測
 │   ├── recorder.py       UDP listener + 賽事偵測狀態機
 │   ├── summarize.py      raw.csv → summary.md 分析報告
+│   ├── cars.py           車輛資料庫 loader（讀 cars/{ordinal}.yml）
+│   ├── gui.py            Tkinter GUI（狀態 / 賽事資料 / 車輛資料三分頁）
 │   └── README.md         本文件
-├── data\forza_telemetry\        (gitignored)
-│   └── sessions\                錄製的 session 資料夾
-│       └── {timestamp}_car{ord}_PI{pi}\
-│           ├── raw.csv          原始 60Hz 遙測（87 欄）
-│           ├── meta.json        車輛、圈數、rewinds 統計
-│           ├── summary.md       summarize.py 產出的人類可讀分析
-│           └── analysis.md      race-analyst skill 產出的調校/駕駛建議
+├── data\forza_telemetry\
+│   ├── sessions\                錄製的 session 資料夾（gitignored）
+│   │   └── {timestamp}_car{ord}_PI{pi}\
+│   │       ├── raw.csv          原始 60Hz 遙測（87 欄）
+│   │       ├── meta.json        車輛、圈數、rewinds 統計（含 car.db 快照）
+│   │       ├── summary.md       summarize.py 產出的人類可讀分析
+│   │       └── analysis.md      race-analyst skill 產出的調校/駕駛建議
+│   └── cars\                    車輛資料庫（**進版控**，git log 即調校史）
+│       ├── _template.yml        範本（複製為 {ordinal}.yml）
+│       ├── README.md            欄位定義 + 維護指引
+│       └── {ordinal}.yml        每台車一份，個人填寫
 ├── .claude\skills\race-analyst\ 讀 summary.md + wiki/ → analysis.md 的 Claude skill
-└── start-telemetry.bat          雙擊啟動 recorder（純 ASCII，呼叫 python -m）
+├── start-telemetry.bat          雙擊啟動 console recorder
+└── start-telemetry-gui.bat      雙擊啟動 GUI（單視窗 + 自動啟動 recorder）
 ```
 
 **依賴**：純 stdlib（`socket`、`struct`、`csv`、`json`、`pathlib`、`dataclasses`、`argparse`、`datetime`、`collections.deque`、`enum`、`logging`、`signal`）。**Python 3.10+**（用了 `X | None` 型別語法）。
@@ -318,6 +326,23 @@ REWIND_THRESHOLD_S = 0.1  # CurrentRaceTime 倒退超過 0.1 秒視為倒轉
 
 3. **CurrentRaceTime 歸零回到非零**：在 IsRaceOn=1 封包之間若出現此模式，會被當成 rewind（保守判斷）。
 
+### 分析層的 rewind 處理（`summarize.py`）
+
+`is_rewind` 欄位是**錄製層**的標記——保留所有資料給審計用。**分析層不直接過濾 `is_rewind`**，而是用 `dedupe_attempts()`：
+
+```
+對每個 1/60 秒 CRT 桶，只保留 arrival_ts 最大的 packet（= 玩家最終定案的版本）。
+```
+
+**為什麼不簡單過濾 `is_rewind=='0'`**：那會**搞反**——`is_rewind=1` 標的是 redo 段（玩家最終選擇的線），`is_rewind=0` 包含 rewind 前的失敗嘗試。直接過濾 `is_rewind=='0'` = 保留失敗、丟棄成功。
+
+**CRT-bucket dedupe 的好處**：
+- 同一彎倒轉 N 次 → 自動只保留第 N+1 次成功的版本
+- 跨彎倒轉（玩家倒回到較早段重做後續多個彎）→ 每個 CRT 桶獨立判定，沒重做的段落維持原樣
+- 輸出依 CRT 排序，下游分析的「1 packet = 1/60s」假設仍成立
+
+實測：11 rewind / ~80s 失敗的 session 排除後，許多被失敗段遮蔽的真實調校線索（整體推頭、差速器鬆、懸吊太軟）才浮現出來。
+
 ---
 
 ## 輸出格式
@@ -359,7 +384,12 @@ data/forza_telemetry/sessions/{YYYY-MM-DD_HH-MM-SS}_car{CarOrdinal}_PI{Performan
     "class": 6,
     "performance_index": 920,
     "drivetrain_type": 2,
-    "num_cylinders": 6
+    "num_cylinders": 6,
+    "db": {
+      "name": "Subaru BRZ 2013",
+      "purpose": "軌跡",
+      "tune": { "tires": { "pressure_front": 22.0, ... }, ... }
+    }
   },
   "race": {
     "total_laps": 3,
@@ -376,6 +406,7 @@ data/forza_telemetry/sessions/{YYYY-MM-DD_HH-MM-SS}_car{CarOrdinal}_PI{Performan
 
 **欄位語意**：
 - `car`：第一個封包的識別（賽事中換車不會重新建 session，所以以第一筆為準）
+- `car.db`：finalize 時從 `data/forza_telemetry/cars/{ordinal}.yml` 凍結進來的快照（**選填**，沒設檔就沒這欄）。包含車名、用途、當時的完整 tune——之後改 tune 不會回溯改動歷史 session
 - `race.total_laps`：本 session 看到的最大 `LapNumber`
 - `race.best_lap_seconds`：`BestLap` 的歷史最小非零值
 - `race.last_lap_seconds`：最後一筆封包的 `LastLap`
@@ -383,19 +414,73 @@ data/forza_telemetry/sessions/{YYYY-MM-DD_HH-MM-SS}_car{CarOrdinal}_PI{Performan
 
 ---
 
+## 車輛資料庫
+
+> 設計細節與單位約定：[`data/forza_telemetry/cars/README.md`](../../data/forza_telemetry/cars/README.md)
+
+UDP 封包只給 `CarOrdinal` 數字（例：1564），人類看不出是什麼車；若想跨場比對「同車不同 tune」也需要記錄當時的調校。
+解法：在 `data/forza_telemetry/cars/{ordinal}.yml` 一車一檔，記錄車名、用途、當前 tune。
+
+### 流程
+
+1. 第一次跑某台車 → session 資料夾出現 `car{N}_PI{M}` → 複製 `_template.yml` 為 `{N}.yml` 填好。
+2. 之後每場 session finalize 時，recorder 自動把該檔內容**凍結**進 `meta.json` 的 `car.db`（包含 tune 完整結構）。
+3. summary.md 顯示 `**Subaru BRZ 2013**（軌跡）— ordinal 1564, PI 700, class A`，不再只看到數字。
+4. race-analyst skill 直接從 meta.json 讀當時的 tune，給建議時知道「目前後 ARB 是 25」。
+
+### 為什麼沒有 history 陣列
+
+調校歷史交給 git——`git log -p data/forza_telemetry/cars/1564.yml` 即演進史。
+要看「上週那場用什麼 tune」開該 session 的 `meta.json` 看 `car.db.tune`（自動凍結）。
+
+陣列在檔內維護的版本最後總是只更新最後一筆，前面的 entry 變半真半假，反而誤導分析。git + session snapshot 兩條路都有原子保證。
+
+### 缺檔行為
+
+`{ordinal}.yml` 不存在不會報錯，meta.json 就只有 UDP 抓得到的基本車輛欄位，summary.md 顯示 ordinal 數字。寫一個檔就接上來，舊 session 的 meta.json 不會回溯加上（這是設計意圖：歷史不可變）。
+
+---
+
 ## 使用方式
 
-### 雙擊啟動（推薦）
+### GUI 模式（推薦）
 
-1. 在檔案總管雙擊 `start-telemetry.bat`（專案根目錄）
-2. 黑色 console 顯示中文 banner + FH5 設定提示
-3. 進 FH5 → HUD → Data Out：
+雙擊 `start-telemetry-gui.bat` → 單一視窗，內含：
+
+- **狀態分頁**：即時顯示 recorder state（IDLE / BUFFERING / **RECORDING**）、封包速率、IsRaceOn、車輛 ordinal/PI、即時車速、當前 session 累積封包數、idle 計時。
+- **賽事資料分頁**：左側列出所有 sessions（依時間倒序），右側以 **markdown 渲染** 預覽選中 session 的 summary.md（headers 變色變大、`**bold**` / `` `code` `` / 表格 / 程式區塊都套樣式）。字體可調：`+` / `−` / `重置` 按鈕，或 `Ctrl+滑鼠滾輪` / `Ctrl+= / Ctrl+- / Ctrl+0`。按鈕：重整 / 開資料夾 / 重生 summary / 刪除。
+- **車輛資料分頁**：列出 `cars/*.yml`，新增（從範本複製並開啟系統預設編輯器）/ 編輯（雙擊或按鈕）/ 開資料夾 / 刪除。
+
+下方控制列恆顯：
+
+| 按鈕 | 用途 |
+|------|------|
+| ▶ 啟動 / ⏹ 停止 recorder | 開關背景錄製執行緒 |
+| ● 強制錄製 | 覆蓋自動偵測，下個封包進入 RECORDING（測直線、bench-mark 直接開錄不用等賽事旗標） |
+| ■ 強制停止 | 立即 finalize 當前 session，回 IDLE |
+
+GUI 與 recorder 是同一個 process，**recorder 跑在背景 thread**——關 GUI 視窗 = 停止錄製。
+
+**配色**：預設深色（VS Code Dark+ 風格）。要淺色：
+
+```powershell
+python -m scripts.forza_telemetry.gui --auto-start --theme light
+```
+
+### Console 模式
+
+雙擊 `start-telemetry.bat` 走純 console 流程（無 GUI、log 直接輸出）：
+
+1. 黑色 console 顯示中文 banner + FH5 設定提示
+2. 進 FH5 → HUD → Data Out：
    - Data Out: ON
    - Data Out IP: `127.0.0.1`
    - Data Out Port: `5300`
    - Data Out Packet Format: **Car Dash**（不要選 Sled）
-4. 跑賽事，自動錄製
-5. 停止：Ctrl+C（安全停止）或直接關閉視窗（強制停止）
+3. 跑賽事，自動錄製
+4. 停止：Ctrl+C（安全停止）或直接關閉視窗（強制停止）
+
+兩種模式行為一致——GUI 只是把 console 模式包進視窗加上互動操作，**錄製邏輯共用同一份 Recorder**。
 
 ### 命令列啟動
 
@@ -656,6 +741,10 @@ for r in rows[:10]:
 
 | 日期 | 變更 | 原因 / 證據 |
 |------|------|------------|
+| 2026-05-04 | `start-telemetry-gui.bat` 移除中文 REM（cp950 解析錯誤再次踩坑） | 雙擊噴 `'?' 不是內部或外部命令`——`chcp 65001` 在 REM 解析後才執行已來不及。重申 CLAUDE.md 早記過的規則：**所有 .bat 必須純 ASCII** |
+| 2026-05-04 | GUI 加深色主題（VS Code Dark+ 配色）+ summary 預覽改用 markdown 渲染（自製 tag-based renderer，支援 headers / bold / code / table / hr / 條列）+ 字體大小可調（按鈕、Ctrl+滾輪、Ctrl+=/-/0），CLI 可 `--theme light` 切換 | 使用者反映原本白底 + 純文字 summary 不好讀；無外部依賴用 ttk `clam` theme + tk.Text tags 達成 |
+| 2026-05-04 | 新增 Tkinter GUI（`gui.py` + `start-telemetry-gui.bat`）：三分頁（狀態/賽事/車輛）、即時 snapshot 輪詢、強制錄製/強制停止、session 與 car 檔的 CRUD。recorder 加 `snapshot()` / `force_record()` / `force_stop()` 與封包速率追蹤 | 原本只有 console + 雙擊 bat，看不到當前狀態、無法快速瀏覽歷史 session、編輯 cars/*.yml 要打開檔案總管。GUI 把這些整合到單視窗，但保留 console 模式（兩者共用同一個 Recorder） |
+| 2026-05-04 | 新增車輛資料庫：`cars.py` loader + `data/forza_telemetry/cars/{ordinal}.yml` + session finalize 凍結 `car.db` 進 meta.json + summarize 顯示車名 + .gitignore 解除 cars/ 排除 | ordinal 數字無法人類辨識（car1564 是什麼？），且需要把每場 session 對應到當時的調校狀態才能做跨場比對。tune 歷史交給 git log，不在檔內維護陣列 |
 | 2026-05-03 | summarize.py 新增 `detect_crashes()` + 全域過濾：3 個獨立訊號（lateral G > 5×3 連續 / longitudinal G > 6 / 速度 50km/h 內掉 10 packet）+ ±0.5s 視窗排除 | Sprint 場 max lateral G **13.1G→4.15G**、max decel **20G→4.88G**——撞車 spike 嚴重污染 G-force / decel events / 懸吊觸底 / 滑移統計，過濾後數字才有調校意義 |
 | 2026-05-03 | summarize.py 過彎分析：加 `CORNER_MAX_RADIUS_M = 250` sweeper 過濾 | 環道彎數 18→14（剔除 4 個 sweeper），平均 Peak G 從 2.12 升到 2.54——把高速微彎從「彎中操控統計」剔除避免污染推頭比例與速度損失均值 |
 | 2026-05-03 | summarize.py 新增 §8「過彎分析」：彎道偵測（hysteresis、outlier cap、apex/crash 過濾）、L/R bias、彎中油門 / 速度損失 / 推頭過度比例、最重煞車 top 3 | 使用者要驗證「車的調校最優化 + 改善駕駛習慣」，需要彎道粒度的訊號；track_bias 是關鍵發現——它讓「右前胎熱 +13.5°C」從調校警報變成「賽道造成的正常現象」 |

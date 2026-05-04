@@ -35,12 +35,18 @@ title: 駕駛操作
 | **連續彎節奏抓不到** | 用**正常 Apex**（不要 late）維持節奏 |
 | **髮夾彎卡住** | 看 [Steering Angle](./賽車線與彎道基礎.md#五steering-angle轉向角度) |
 | **車不夠靈活** | 接受 **healthy oversteer**——不要把車調太穩 |
+| **漂移老是 spin out** | 反打更早、油門控制更輕——詳見 [漂移基礎](./漂移基礎.md) |
+| **漂移甩不開／推頭抓不出** | 入彎更晚轉、手煞車拉久一點，或 build 加 grip |
+| **RWD 起步打滑、跑不快** | 用 [Launch 找頂速法](./RWD駕駛技巧.md#二launch起步)：拖車道測一檔頂速，逼近頂速再升檔 |
+| **RWD 出彎踩油就甩** | 撐到 apex 後再加油，全油等 g 力顯示重量已到後輪——詳見 [RWD 過彎油門管理](./RWD駕駛技巧.md#三過彎油門管理rwd-核心技術) |
 
 ---
 
 ## 📚 本分類所有主題
 
 - [賽車線與彎道基礎](./賽車線與彎道基礎.md) ⭐ — Racing Line / Apex / Late Apex / Healthy Oversteer + Slip Angle / Steering Angle
+- [漂移基礎](./漂移基礎.md) — 前置設定 / 手煞車入彎 / 反打 / 油門控速 / 練習路徑 / 抓地對偶排錯
+- [RWD 駕駛技巧](./RWD駕駛技巧.md) — FH5 RWD meta 復活 / Launch 找頂速法 / 過彎重量轉移 / 不要彎太多
 
 ---
 
@@ -56,4 +62,4 @@ title: 駕駛操作
 
 ## 後續規劃
 
-漂移、起步、煞車技巧（threshold braking、trail braking）待後續來源整合。
+煞車技巧（threshold braking、trail braking）待後續來源整合。

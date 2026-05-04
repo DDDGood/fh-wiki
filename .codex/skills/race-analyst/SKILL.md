@@ -3,8 +3,6 @@ name: race-analyst
 description: >
   Forza Horizon 5 賽事資料分析助手。當使用者跑完賽事、產生 summary.md 後，要求「分析這場賽事」「看一下這份 summary」「給我調校與駕駛建議」「幫我看這場資料」時觸發。
   讀取 data/forza_telemetry/sessions/.../summary.md 與 meta.json，比對 Docs/wiki/ 的調校與駕駛知識，產出結構化建議：駕駛技巧 + 調校數值 + 下次測試清單，每條建議引用對應 wiki 來源。
-user-invocable: true
-argument-hint: "<session 資料夾路徑或 summary.md 路徑，可省略則用最新>"
 ---
 
 # Race Analyst（Forza Horizon 5 賽事分析師）
@@ -76,6 +74,35 @@ argument-hint: "<session 資料夾路徑或 summary.md 路徑，可省略則用�
 ```
 
 **不要**當場改 summarize.py——保持 skill 專注於「讀資料給建議」，工具改進讓使用者起 task 處理（race-analyst skill 自身的職責邊界要清楚）。
+
+---
+
+## 重要前提：可疑外部事實要上網查證
+
+分析優先順序是：`summary.md` 找線索 → `raw.csv` 驗證資料 → `Docs/wiki/` 找專案內知識 → **必要時上網查證外部事實**。網路搜尋是疑慮處理工具，不是取代 wiki 或 raw 的捷徑。
+
+### 何時要上網搜尋
+
+遇到以下情況，先明確說「這是外部事實疑慮」，再搜尋：
+
+- **Forza Data Out / UDP packet 規格疑慮**：欄位型別、offset、單位、FH5 是否和 FM7/FH4 不同。
+- **遊戲版本或 Series 更新可能影響判讀**：調校上限、PI 規則、輪胎/空力/差速器行為是否近期改過。
+- **summary 或 parser 的物理結果不合理**，且 raw 驗證後仍無法解釋。
+- **wiki 沒有覆蓋的車輛、配件、賽事、設定怪癖**，但建議依賴該外部事實。
+- **使用者描述和專案資料衝突**，需要確認是否有已知 bug、社群共識或官方說明。
+
+### 搜尋來源優先順序
+
+1. 官方 Forza Support / Forza forums / 遊戲內可驗證資訊。
+2. 已知 telemetry 實作或資料規格 repo，例如 `holgerkenn/Forza-IoT-Relay`、`raweceek-temeletry/forza-horizon-5-UDP`、`austinbaccus/forza-telemetry`。
+3. 高品質社群討論、Reddit、Steam 指南、YouTube/Bilibili 教學。
+
+引用外部資料時，要在 `analysis.md` 裡標註來源連結與查證日期。若外部資料只是一則主觀調校配方，不要直接把它當處方；只能作為「可參考的假設」，仍需回到本場 telemetry 與 wiki 驗證。
+
+### 查到有價值內容時
+
+- 若是穩定、可重用的知識，建議使用者後續用 `knowledge-curator` 收錄到 `Docs/_sources/`，再由 `wiki-integrator` 精煉進 wiki。
+- 若是暫時性資訊（近期 patch、活動規則、論壇 bug 回報），只放在本次 `analysis.md` 的「外部查證」段，不直接寫進 wiki。
 
 ---
 

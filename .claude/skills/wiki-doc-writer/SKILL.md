@@ -1,7 +1,7 @@
 ---
 name: wiki-doc-writer
 description: Forza Horizon 攻略主題長文撰寫助手。當使用者要求「寫一篇 XX 攻略」「整合 _sources 裡關於 XX 的內容寫成一篇精煉文」「為 wiki 新增某主題的完整教學」時使用。差異於 wiki-integrator：本 skill 主動從多份既有來源綜合撰寫，而非被動接收新進來源。
-user-invokable: true
+user-invocable: true
 argument-hint: "<主題名稱> [目標分類]  例：差速器進階 tuning"
 ---
 
@@ -90,6 +90,28 @@ argument-hint: "<主題名稱> [目標分類]  例：差速器進階 tuning"
 4. **繁中 + 保留專有名詞原拼寫**：BRZ、Evora、Viper、S1、A 組等。
 5. **分段短**：避免六七行一整坨，用表格、清單、引用區塊切開。
 6. **數值欄位前後端明示**：寫「前 30 / 後 28」不要只寫「30/28」。
+
+7. **可量化規則用統一 callout 標註**：若你寫的內容包含「可觀測指標 → 處方」型的規則（典型 telemetry-detectable），用下列 callout 包起來，方便日後 grep 與 race-analyst 自動交叉檢查。
+
+   ```markdown
+   > 🔬 **可量化規則**
+   >
+   > 條件：{可觀測指標} {比較運算} {門檻}
+   > 處方：{調校或駕駛動作}
+   > 遙測對應：{已偵測 — summarize.py 缺陷 N / 未偵測 / 未偵測（DEFERRED）}
+   ```
+
+   範例：
+
+   ```markdown
+   > 🔬 **可量化規則**
+   >
+   > 條件：四輪平均胎溫 < 65°C 且彎內 understeer 時間佔比 ≥ 15%
+   > 處方：全車 toe out +0.1°（前後各 +0.1，總和 ≤ 0.3°）
+   > 遙測對應：已偵測 — summarize.py 缺陷 5
+   ```
+
+   **何時要寫**：你引用的來源段落本身已給出量化門檻或可量化症狀。**不必寫**：純哲學、原理、車型介紹、操作步驟。寫的時候若不確定 summarize 是否已偵測，先 grep 一輪 `summarize.py`；確認不到再標「未偵測」。
 
 #### 檔案模板
 

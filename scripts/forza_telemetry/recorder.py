@@ -85,9 +85,56 @@ class Recorder:
     _session: Session | None = None
     _stop: bool = False
     _first_packet_logged: bool = False
+    # Status snapshot fields — read by GUI poll thread; bool/int/object refs are
+    # atomic in CPython so no lock needed for the simple read pattern.
+    _last_packet: pkt.Packet | None = None
+    _last_packet_at: float = 0.0
+    _recent_packet_times: deque[float] = field(default_factory=lambda: deque(maxlen=120))
+    # Manual override flags — UI sets, recorder thread acts on next packet.
+    _force_record_request: bool = False
+    _force_stop_request: bool = False
 
     def stop(self) -> None:
         self._stop = True
+
+    def force_record(self) -> None:
+        """Override auto-detection: start recording immediately on next packet.
+        No-op if already RECORDING. Discards any BUFFERING state."""
+        self._force_record_request = True
+
+    def force_stop(self) -> None:
+        """Override auto-detection: finalize current session on next packet.
+        No-op if IDLE. Auto-detect resumes after — press again or stop the
+        recorder entirely if you want to stay stopped."""
+        self._force_stop_request = True
+
+    def snapshot(self) -> dict:
+        """Thread-safe (read-only) status snapshot for UI display."""
+        sess = self._session
+        last = self._last_packet
+        idle_for = (time.monotonic() - self._idle_started_at) if self._idle_started_at > 0 else 0.0
+        return {
+            "state": self.state.value,
+            "packet_rate_hz": self._compute_packet_rate(),
+            "last_packet_at": self._last_packet_at if self._last_packet_at else None,
+            "is_race_on": int(last.IsRaceOn) if last else None,
+            "car_ordinal": int(last.CarOrdinal) if last else None,
+            "car_pi": int(last.CarPerformanceIndex) if last else None,
+            "speed_kmh": float(last.Speed) * 3.6 if last else None,
+            "buffer_size": len(self._buffer),
+            "session_folder": str(sess.folder) if sess and sess.folder else None,
+            "session_packet_count": sess.packet_count if sess else 0,
+            "idle_seconds": idle_for,
+        }
+
+    def _compute_packet_rate(self) -> float:
+        """Count of packets received in the last 1 second."""
+        if not self._recent_packet_times:
+            return 0.0
+        cutoff = time.monotonic() - 1.0
+        while self._recent_packet_times and self._recent_packet_times[0] < cutoff:
+            self._recent_packet_times.popleft()
+        return float(len(self._recent_packet_times))
 
     def run(self) -> None:
         cfg = self.config
@@ -134,6 +181,33 @@ class Recorder:
             self._first_packet_logged = True
 
         now = time.monotonic()
+        # Status tracking for GUI snapshot — must precede force-flag handling
+        # so the snapshot reflects the latest packet even if force_stop fires.
+        self._last_packet = p
+        self._last_packet_at = now
+        self._recent_packet_times.append(now)
+
+        # Manual overrides take effect before the auto state machine.
+        if self._force_stop_request:
+            self._force_stop_request = False
+            if self.state is State.RECORDING:
+                self._finalize_if_open(reason="manual stop")
+            elif self.state is State.BUFFERING:
+                self._discard_buffer(reason="manual stop")
+            # State is now IDLE; this packet is dropped (next packet starts fresh).
+            return
+
+        if self._force_record_request:
+            self._force_record_request = False
+            if self.state is not State.RECORDING:
+                if self.state is State.BUFFERING:
+                    self._buffer.clear()
+                self._buffer.append((p, time.time()))
+                self._enter_recording()
+                log.info("manual record: forced into RECORDING")
+                return  # packet already flushed via _enter_recording
+            # Already RECORDING: fall through to normal write path.
+
         race_on = p.IsRaceOn == 1
 
         if self.state is State.IDLE:

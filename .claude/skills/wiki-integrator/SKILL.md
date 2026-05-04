@@ -1,7 +1,7 @@
 ---
 name: wiki-integrator
 description: Forza Horizon 攻略精煉整合助手。將 Docs/_sources/ 中的原始整理版拆片段、分類、比對既有 wiki/ 內容，產出「新增／合併／修訂／略過」計劃供使用者確認後套用，持續去蕪存菁。當使用者說「整合這份攻略進 wiki」「精煉／去蕪存菁」「更新攻略庫」「處理 _sources 裡還沒整合的來源」時觸發。
-user-invokable: true
+user-invocable: true
 argument-hint: "<_sources 檔名或完整路徑，留白=掃描所有未整合來源>"
 ---
 
@@ -90,6 +90,7 @@ argument-hint: "<_sources 檔名或完整路徑，留白=掃描所有未整合�
 - 目標：`wiki/tuning/差速器.md`（新建）
 - 關鍵詞：差速器, 加速鎖止, 減速鎖止
 - 原文行：L245-L312
+- telemetry：— N/A（純原理說明，不可量化）
 - 建議 frontmatter：
   ```yaml
   tags: [差速器, 進階]
@@ -101,11 +102,13 @@ argument-hint: "<_sources 檔名或完整路徑，留白=掃描所有未整合�
 - 目標：`wiki/tuning/阻尼.md` 的「## 反彈阻尼」章節
 - 增量：新來源提到 Series 22 更新後的新上限 ——
   > 原文節錄：反彈阻尼上限已改為 20.0，舊攻略的 15.0 為過時資訊。
+- telemetry：🔄 SYNC — summarize.py 缺陷 2「出彎後懸吊回彈過快」門檻 0.10/packet 對應的數值意義可能變動，建議 review
 - 風險：會動到既有內容，請確認
 
 ## 片段 3：{H2 標題} → **REVISE**（衝突！）
 - 目標：`wiki/tuning/胎壓.md`
 - 衝突點：既有檔說公路胎「前 30 / 後 28」，新來源說「前 28 / 後 26」
+- telemetry：— N/A（具體 PSI 不影響 summarize 的量化偵測）
 - 建議處置：
   - [ ] 選項 A：改用新數值（覆寫）
   - [ ] 選項 B：併列兩種說法 + 各自來源
@@ -113,12 +116,58 @@ argument-hint: "<_sources 檔名或完整路徑，留白=掃描所有未整合�
 
 ## 片段 4：... → **DUP**
 - 略過，僅在 `wiki/upgrades/PI性價比.md` 的 sources 加上本來源引用
+- telemetry：— N/A
 
 ---
 
 ## 請你裁示
 全部照建議 / 逐項確認 / 調整分類 / 暫停
 ```
+
+### Phase 4.5：Telemetry Sync Check（每個 NEW/MERGE/REVISE 都做）
+
+對每個會落地的片段，問三個問題，把結果填入計劃的 `telemetry` 欄：
+
+1. **此片段是否含「可量化症狀 → 處方」規則？**  
+   範例：「前胎比後胎熱 10°C → 推頭」「行程超出 [0.15, 0.85] → 彈簧過軟」「Δ > 0.20」「rate > 0.10/packet」
+
+2. **`scripts/forza_telemetry/summarize.py` 是否已偵測此症狀？**
+   - Grep `summarize.py` 看是否有對應 finding 或 threshold 常數
+   - 看現存 session 的 `summary.md` 範例輸出有沒有對應段落
+   - 若 wiki 段落已用「🔬 可量化規則」callout 標註過 → 看 callout 註腳的「遙測對應」狀態
+
+3. **打標**：
+
+| 標記 | 含義 | 後續動作 |
+|------|------|----------|
+| 🔄 **SYNC** | summarize 已偵測但**門檻或處方不一致** | 整合完起 task：對齊 summarize.py threshold 常數 |
+| 🆕 **NEW_FINDING** | summarize 還沒偵測，但 wiki 給了量化規則 | 整合完起 task：考慮新增對應 finding（參考 `summarize.py` 既有缺陷 0-8 模式） |
+| ⏸ **DEFERRED** | 可量化但短期不打算寫 finding（成本/雜訊比不划算） | 計劃中說明原因 |
+| **— N/A** | 不可量化（哲學/原理/單純數值） | 無動作 |
+
+#### 寫進 wiki 時，順手用「🔬 可量化規則」callout 標註
+
+對「✅ 已落地的可量化規則」（無論 SYNC、NEW_FINDING、或 summarize 既有覆蓋的），於 wiki 段落內以下列 callout 格式標註，方便日後 grep + race-analyst 自動交叉檢查：
+
+```markdown
+> 🔬 **可量化規則**
+>
+> 條件：{可觀測指標} {比較運算} {門檻}
+> 處方：{調校或駕駛動作}
+> 遙測對應：{已偵測 — summarize.py 缺陷 N / 未偵測 / 未偵測（DEFERRED）}
+```
+
+**範例**（會落到 `wiki/tuning/三段彎道診斷.md` 的「其他常見症狀」表附近）：
+
+```markdown
+> 🔬 **可量化規則**
+>
+> 條件：入彎前懸吊壓縮速度 > 0.10/packet（≈ 6.0/s 的歸一化行程變化）
+> 處方：加前 bump 阻尼 1-2 級
+> 遙測對應：已偵測 — summarize.py 缺陷 2
+```
+
+舊 wiki 內容**不必回頭補 callout**——這是新片段落地時的標準動作，不做歷史回填（會爆。）
 
 ### Phase 5：套用變更
 
@@ -163,6 +212,18 @@ argument-hint: "<_sources 檔名或完整路徑，留白=掃描所有未整合�
 2. 若 `Docs/wiki/*.md` 總數達 5 篇以上而 `Docs/INDEX.md` 不存在 → 主動建立
 3. 已存在 `Docs/INDEX.md` → 追加新檔到對應分類下
 4. 告知使用者結果：新建 N 檔、修訂 M 檔、衝突待決 K 項
+
+#### Telemetry coverage 同步提醒
+
+若本次計劃含 🔄 SYNC 或 🆕 NEW_FINDING：
+
+> ⚠️ 本次整合涉及 N 條 telemetry-detectable 規則：
+> - 🔄 SYNC：{count} 個門檻/處方在 summarize.py 與本次 wiki 更新間不一致
+> - 🆕 NEW_FINDING：{count} 個 wiki 已給量化規則但 summarize.py 尚未偵測
+>
+> 建議起一個獨立 task 處理 summarize.py 同步：
+> 1. SYNC：對照 summarize.py 上方 threshold 常數區（搜尋 `# Threshold values used across analysis`）與本次落地的 wiki 門檻，決定是否對齊
+> 2. NEW_FINDING：參考 `summarize.py` 既有「缺陷 0-8」實作 pattern（grep `=== 缺陷` 看注釋區）新增 finding，記得附 wiki 引用
 
 ---
 

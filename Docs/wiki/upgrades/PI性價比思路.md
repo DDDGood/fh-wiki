@@ -13,7 +13,8 @@ sources:
   - Docs/_sources/HokiHoshi_FH5_2025改裝速成_整理版.md
   - Docs/_sources/HokiHoshi_FH5_2021改裝零件指南_整理版.md
   - Docs/_sources/Mustuff124_FH5_2023調校全面教學_整理版.md
-last_updated: 2026-05-03
+  - Docs/_sources/Johnson Racing_FH5_2025_FXX_S1_AWD_OP教學_整理版.md
+last_updated: 2026-05-04
 revisions:
   - { date: 2026-04-22, note: 初版，源自《硬核調校指南》二、改裝配件選擇（PI 性價比思路） }
   - { date: 2026-05-02, note: 從 HokiHoshi 2025 改裝速成補入「PI 系統的限制」（PI 不準、升級限度、meta 演進）、「引擎三強簡化版」、「HokiHoshi 升級順序對照」 }
@@ -21,6 +22,7 @@ revisions:
   - { date: 2026-05-03, note: 從 Mustuff124 2023 調校全面教學補入：依「原廠進氣方式」三層 chassis-引擎對應表（離心 NA / 渦輪 NA / 強制進氣特例）+ 後胎寬大馬力細分 + 前輪配件車型例外（輪轂減 PI、輪廓 International 800A）}
   - { date: 2026-05-03, note: 引擎章節重構：把硬核／HokiHoshi 三強／Mustuff124 三家平行清單合併為「統一速查表」（標註每個引擎的 chassis、進氣選項、多家共識），把三層 CP 分類獨立為底層邏輯說明；同步在 引擎配件.md 與 改造選擇.md 加入醒目 cross-link }
   - { date: 2026-05-03, note: 把「統一速查表」搬移至 改造選擇.md（更貼近 Conversions 動作的核心問題「換哪顆引擎」）；本檔保留三層 CP 分類底層邏輯 + HokiHoshi 三強簡述 + 判斷新引擎 CP 的方法，避免速查表雙處重複維護 }
+  - { date: 2026-05-04, note: 評估 Johnson Racing 2025 PI 凹點觀點（最重輪框 + 後輪框放大、off-road 懸吊跨界回 PI、8 速 race trans 逐車試 PI），分別由 輪胎配件.md / 底盤配件.md / 傳動配件.md 對應章節承接；本檔僅加入為來源 }
 ---
 
 # PI 性價比思路
@@ -284,3 +286,4 @@ HokiHoshi 2025 把焦點縮小到**三組最強引擎置換**：**6.2 L V8**（=
 - [《HokiHoshi FH5 2025 改裝速成》整理版](../../_sources/HokiHoshi_FH5_2025改裝速成_整理版.md) — 開場通則（PI 不準、升級限度）+ 一、引擎置換（三強簡化版）+ 七、Engine 升級順序
 - [《HokiHoshi FH5 2021 改裝零件指南》整理版](../../_sources/HokiHoshi_FH5_2021改裝零件指南_整理版.md) — 一、級距系統（單人 vs 多人 PI 哲學 + Ford Escort 升級限度具體例）
 - [《Mustuff124 FH5 2023 調校全面教學》整理版](../../_sources/Mustuff124_FH5_2023調校全面教學_整理版.md) — 四之 1 引擎選擇（chassis-引擎對應表）+ 四之 7 後輪距／後胎寬（大馬力細分）+ 三之 2 前輪配件車型例外
+- [《Johnson Racing FH5 2025 FXX S1 AWD OP 教學》整理版](../../_sources/Johnson Racing_FH5_2025_FXX_S1_AWD_OP教學_整理版.md) — 1.7 微操凹 PI（最重輪框 + 後輪框放大 + 8 速 race trans + off-road 懸吊跨界；具體章節分別由 輪胎配件.md / 底盤配件.md / 傳動配件.md 承接）
