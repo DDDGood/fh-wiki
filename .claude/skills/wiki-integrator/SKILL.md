@@ -253,6 +253,7 @@ revisions:                    # 修訂歷程，最新在下
 - 虛構 `sources`（沒看過的來源不能列）
 - `last_updated` 亂填
 - `version` 猜（真的不確定就填「未標註」）
+- `revisions` 的 flow mapping `{ date, note }` 內 note 值**禁止**含 `[文字](連結)` markdown 連結語法、`{ }`、`[ ]`、未配對引號 — YAML 會把 `[` 當成內嵌序列開頭導致 `vitepress build` 解析失敗。要指涉其他條目用純文字「防傾桿條目」或加引號 `note: "..."`
 
 ---
 
