@@ -3,7 +3,7 @@
 > 本索引列出 `Docs/wiki/` 下所有精煉攻略，依 `_category.yml` 分類排序。
 > 靜態網站部署後亦可透過側邊欄瀏覽；此檔供離線／GitHub 直接查閱之用。
 
-**最後更新**：2026-05-05
+**最後更新**：2026-05-05（新增駕駛分類三檔：煞車技巧 / 越野駕駛技巧 / 進階練習小技巧）
 
 ---
 
@@ -80,9 +80,12 @@
 
 | 檔案 | 一句話 |
 |------|--------|
-| [賽車線與彎道基礎](wiki/driving/賽車線與彎道基礎.md) | Racing Line / Apex / Late Apex / Healthy Oversteer / Slip vs Steering Angle |
+| [賽車線與彎道基礎](wiki/driving/賽車線與彎道基礎.md) | Racing Line / Geometric vs Ideal Line / Apex / Late Apex / Healthy Oversteer / Slip vs Steering Angle |
+| [煞車技巧](wiki/driving/煞車技巧.md) | 入彎煞車三大壞習慣 / 重煞→平順鬆煞 / 重量轉移路徑前→外→後 / Trail Braking |
 | [漂移基礎](wiki/driving/漂移基礎.md) | 前置設定 + 駕駛技巧 + 排錯（HokiHoshi 2021 漂移完整指南濃縮） |
 | [RWD 駕駛技巧](wiki/driving/RWD駕駛技巧.md) | meta 背景 / Launch / 過彎重量管理 / 不要彎太多 |
+| [越野駕駛技巧](wiki/driving/越野駕駛技巧.md) | Grip zone / 受控 oversteer 入彎 / 跨彎重量管理 |
+| [進階練習小技巧](wiki/driving/進階練習小技巧.md) | Drafting / Throttle/Steering Feathering / 慢車練習法 / Rivals 自我幽靈練習 |
 
 ---
 
@@ -128,6 +131,7 @@ _尚無內容。_
 - [HokiHoshi FH5 2021 調校教學](_sources/HokiHoshi_FH5_2021調校教學_整理版.md)
 - [HokiHoshi FH5 2021 漂移完整指南](_sources/HokiHoshi_FH5_2021漂移完整指南_整理版.md)
 - [HokiHoshi FH5 2021 RWD 完整指南](_sources/HokiHoshi_FH5_2021RWD完整指南_整理版.md)
+- [HokiHoshi FH4 2019 駕駛學校 走線與技巧](_sources/HokiHoshi_FH4_2019駕駛學校_走線與技巧_整理版.md) — 跨代通用駕駛理論：Geometric vs Ideal Line、Trail Braking、Rally 駕駛、Rivals 自我幽靈
 
 ### 英文社群（其他）
 - [Mustuff124 FH5 2023 調校全面教學](_sources/Mustuff124_FH5_2023調校全面教學_整理版.md) — 多家比對的具體例補強

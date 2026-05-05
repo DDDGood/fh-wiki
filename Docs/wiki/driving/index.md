@@ -33,7 +33,7 @@ title: 駕駛操作
 | **出彎踩油就甩** | 練**油門控制**——RWD 出彎大多是**腳的問題**而非調校問題 |
 | **長直線後彎太慢** | 試 **Late Apex** 走線——讓出彎能更早全油門 |
 | **連續彎節奏抓不到** | 用**正常 Apex**（不要 late）維持節奏 |
-| **髮夾彎卡住** | 看 [Steering Angle](./賽車線與彎道基礎.md#五steering-angle轉向角度) |
+| **髮夾彎卡住** | 看 [Steering Angle](./賽車線與彎道基礎.md#六steering-angle轉向角度) |
 | **車不夠靈活** | 接受 **healthy oversteer**——不要把車調太穩 |
 | **漂移老是 spin out** | 反打更早、油門控制更輕——詳見 [漂移基礎](./漂移基礎.md) |
 | **漂移甩不開／推頭抓不出** | 入彎更晚轉、手煞車拉久一點，或 build 加 grip |
@@ -44,9 +44,12 @@ title: 駕駛操作
 
 ## 📚 本分類所有主題
 
-- [賽車線與彎道基礎](./賽車線與彎道基礎.md) ⭐ — Racing Line / Apex / Late Apex / Healthy Oversteer + Slip Angle / Steering Angle
+- [賽車線與彎道基礎](./賽車線與彎道基礎.md) ⭐ — Racing Line / Geometric vs Ideal Line / Apex / Late Apex / Healthy Oversteer + Slip Angle / Steering Angle
+- [煞車技巧](./煞車技巧.md) — 入彎煞車三大壞習慣 / 重煞→平順鬆煞 / 重量轉移路徑前→外→後 / Trail Braking
 - [漂移基礎](./漂移基礎.md) — 前置設定 / 手煞車入彎 / 反打 / 油門控速 / 練習路徑 / 抓地對偶排錯
 - [RWD 駕駛技巧](./RWD駕駛技巧.md) — FH5 RWD meta 復活 / Launch 找頂速法 / 過彎重量轉移 / 不要彎太多
+- [越野駕駛技巧](./越野駕駛技巧.md) — Grip zone / 受控 oversteer 入彎 / 跨彎重量管理
+- [進階練習小技巧](./進階練習小技巧.md) — Drafting / Throttle/Steering Feathering / 慢車練習法 / Rivals 自我幽靈練習
 
 ---
 
@@ -57,9 +60,10 @@ title: 駕駛操作
 3. **找出每個彎的 Apex**——刻意瞄準
 4. **接長直線的彎**——試 **Late Apex**
 5. **觀察車況**：哪段 understeer / oversteer 嚴重 → 對應調校（[三段彎道診斷](../tuning/三段彎道診斷.md)）
+6. **進入 Rivals 自己 ghost 練習** → [進階練習小技巧](./進階練習小技巧.md#四rivals-自我幽靈練習單一最有效的練習方法)
 
 ---
 
 ## 後續規劃
 
-煞車技巧（threshold braking、trail braking）待後續來源整合。
+Threshold braking（門檻煞車）待後續來源整合。Trail braking 已落入 [煞車技巧](./煞車技巧.md)。
