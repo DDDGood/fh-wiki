@@ -301,18 +301,44 @@ def segment_by_distance(valid_rows: list, n_segments: int = SINGLE_RUN_SEGMENTS)
 
 # ----- analysis primitives ---------------------------------------------------
 
+def _f_to_c(f: float) -> float:
+    """FH5 UDP TireTemp* 欄位是華氏度（cold ≈ 130°F、operating ≈ 200°F、hot ≈ 230°F）。
+    全分析以攝氏為準，故在資料邊界一次轉換。"""
+    return (f - 32.0) * 5.0 / 9.0
+
+
 def analyze_tires(segments: list[Segment]) -> dict:
-    """Per-segment tire temperatures + overall pattern."""
+    """Per-segment tire temperatures + overall pattern.
+
+    回傳值的所有溫度欄位皆為 **攝氏**（UDP 原始值是華氏，已在此函式邊界轉換）。
+
+    **RR data quality 檢測**：FH5 已知 bug——TireTempRearRight 欄位常常逐 packet
+    複製 TireTempRearLeft（max|RL-RR| < 0.01°F 全程都成立）。若偵測到此情況，
+    `rr_unreliable=True`，下游應隱藏 RR 欄位與 lr_rear_delta，避免假陰性。
+    """
+    # RR mirrors RL? 全場任一 packet 出現差異就判可信。
+    rr_unreliable = True
+    for seg in segments:
+        for r in seg.packets:
+            if abs(F(r, 'TireTempRearLeft') - F(r, 'TireTempRearRight')) > 0.01:
+                rr_unreliable = False
+                break
+        if not rr_unreliable:
+            break
+
     rows = []
     for seg in segments:
-        fl = statistics.mean(F(r, 'TireTempFrontLeft') for r in seg.packets)
-        fr = statistics.mean(F(r, 'TireTempFrontRight') for r in seg.packets)
-        rl = statistics.mean(F(r, 'TireTempRearLeft') for r in seg.packets)
-        rr = statistics.mean(F(r, 'TireTempRearRight') for r in seg.packets)
+        fl = _f_to_c(statistics.mean(F(r, 'TireTempFrontLeft') for r in seg.packets))
+        fr = _f_to_c(statistics.mean(F(r, 'TireTempFrontRight') for r in seg.packets))
+        rl = _f_to_c(statistics.mean(F(r, 'TireTempRearLeft') for r in seg.packets))
+        rr = _f_to_c(statistics.mean(F(r, 'TireTempRearRight') for r in seg.packets))
+        # RR 不可信時：rear_avg 改用 RL 單值，lr_rear_delta 標 None
+        rear_avg = rl if rr_unreliable else (rl + rr) / 2
+        lr_rear_delta = None if rr_unreliable else rl - rr
         rows.append({"label": seg.label, "fl": fl, "fr": fr, "rl": rl, "rr": rr,
-                    "front_avg": (fl + fr) / 2, "rear_avg": (rl + rr) / 2,
-                    "lr_front_delta": fl - fr, "lr_rear_delta": rl - rr,
-                    "fr_delta": (fl + fr) / 2 - (rl + rr) / 2})
+                    "front_avg": (fl + fr) / 2, "rear_avg": rear_avg,
+                    "lr_front_delta": fl - fr, "lr_rear_delta": lr_rear_delta,
+                    "fr_delta": (fl + fr) / 2 - rear_avg})
     # Overall (skip first segment if lapped — it's typically warm-up)
     skip_first = segments[0].lap_number == 0 and len(segments) > 1
     body = rows[1:] if skip_first else rows
@@ -324,16 +350,19 @@ def analyze_tires(segments: list[Segment]) -> dict:
             "rr": statistics.mean(r["rr"] for r in body),
         }
         ovr["front_avg"] = (ovr["fl"] + ovr["fr"]) / 2
-        ovr["rear_avg"] = (ovr["rl"] + ovr["rr"]) / 2
+        ovr["rear_avg"] = ovr["rl"] if rr_unreliable else (ovr["rl"] + ovr["rr"]) / 2
         ovr["fr_delta"] = ovr["front_avg"] - ovr["rear_avg"]
         ovr["lr_front_delta"] = ovr["fl"] - ovr["fr"]
-        ovr["lr_rear_delta"] = ovr["rl"] - ovr["rr"]
-        hottest = max(["fl", "fr", "rl", "rr"], key=lambda k: ovr[k])
+        ovr["lr_rear_delta"] = None if rr_unreliable else ovr["rl"] - ovr["rr"]
+        # RR 不可信時不把 RR 列入 hottest 候選
+        candidates = ["fl", "fr", "rl"] if rr_unreliable else ["fl", "fr", "rl", "rr"]
+        hottest = max(candidates, key=lambda k: ovr[k])
     else:
         ovr = None
         hottest = None
     return {"per_segment": rows, "overall": ovr, "hottest_corner": hottest,
-            "skipped_first_segment": skip_first}
+            "skipped_first_segment": skip_first,
+            "rr_unreliable": rr_unreliable}
 
 
 def analyze_slip(segments: list[Segment]) -> dict:
@@ -652,6 +681,9 @@ def analyze_inputs(valid_rows: list) -> dict:
     steer = [I(r, 'Steer') for r in valid_rows]
     abs_steer = [abs(s) for s in steer]
     steer_max = max(abs_steer) if abs_steer else 0
+    # Trail-brake / brake-throttle-overlap 用：橫向 G 用 AccelerationX（車身座標）
+    # 0.4 G 是「明顯彎中」門檻，低於此視為直線煞車。
+    abs_lat_g = [abs(F(r, 'AccelerationX')) / 9.81 for r in valid_rows]
 
     # ---- Steer pin (方向打死) detection ----
     # |Steer| >= max_observed * 0.8 sustained for >= 0.5s (30 packets).
@@ -805,7 +837,15 @@ def analyze_inputs(valid_rows: list) -> dict:
         "brake_max": max(brake),
         "brake_avg": statistics.mean(brake),
         "brake_full_pct": sum(1 for b in brake if b >= BRAKE_FULL_THRESHOLD) / n * 100,
-        "trail_brake_pct": sum(1 for j in range(n) if accel[j] > 50 and brake[j] > 50) / n * 100,
+        # trail braking = 帶煞入彎（煞車期間有明顯橫向 G）；不是「油門煞車同踩」
+        "trail_brake_pct": (sum(1 for j in range(n) if brake[j] > 50 and abs_lat_g[j] > 0.4) / n * 100),
+        # brake/throttle overlap = 同時踩油門與煞車（左腳煞車或誤踩）；獨立指標
+        "brake_throttle_overlap_pct": sum(1 for j in range(n) if accel[j] > 50 and brake[j] > 50) / n * 100,
+        # trail brake 占「有煞車 packet」比例——避免看似 trail brake 高但其實只是煞車總量低
+        "trail_brake_share_of_braking": (
+            sum(1 for j in range(n) if brake[j] > 50 and abs_lat_g[j] > 0.4)
+            / max(sum(1 for j in range(n) if brake[j] > 50), 1) * 100
+        ),
         "coast_pct": sum(1 for j in range(n) if accel[j] < 5 and brake[j] < 5) / n * 100,
         "steer_max": steer_max,
         "steer_avg_abs": statistics.mean(abs_steer),
@@ -2028,11 +2068,16 @@ def fmt_segment_table_speed(segments: list[Segment]) -> list[str]:
 
 
 def fmt_tire_table(tire_data: dict) -> list[str]:
-    out = ['| 段 | FL | FR | RL | RR | L-R 前 | L-R 後 | 前-後 |',
+    rr_bad = tire_data.get("rr_unreliable", False)
+    rr_header = 'RR ⚠️' if rr_bad else 'RR'
+    lr_rear_header = 'L-R 後 ⚠️' if rr_bad else 'L-R 後'
+    out = [f'| 段 | FL | FR | RL | {rr_header} | L-R 前 | {lr_rear_header} | 前-後 |',
            '|----|----|----|----|----|--------|--------|-------|']
     for r in tire_data["per_segment"]:
-        out.append(f'| {r["label"]} | {r["fl"]:.0f} | {r["fr"]:.0f} | {r["rl"]:.0f} | {r["rr"]:.0f} | '
-                  f'{r["lr_front_delta"]:+.1f} | {r["lr_rear_delta"]:+.1f} | {r["fr_delta"]:+.1f} |')
+        rr_cell = 'n/a' if rr_bad else f'{r["rr"]:.0f}'
+        lr_rear_cell = 'n/a' if r["lr_rear_delta"] is None else f'{r["lr_rear_delta"]:+.1f}'
+        out.append(f'| {r["label"]} | {r["fl"]:.0f} | {r["fr"]:.0f} | {r["rl"]:.0f} | {rr_cell} | '
+                  f'{r["lr_front_delta"]:+.1f} | {lr_rear_cell} | {r["fr_delta"]:+.1f} |')
     return out
 
 
@@ -2867,22 +2912,33 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     # Tire detail
     if tires["overall"]:
         ovr = tires["overall"]
+        rr_bad = tires.get("rr_unreliable", False)
         o.append(f'### 1. 輪胎溫度分布')
         o.append('')
         skip_note = '（已排除 Lap 0 暖胎圈）' if tires["skipped_first_segment"] else ''
-        o.append(f'排除暖胎後{skip_note}的平均：FL={ovr["fl"]:.0f}°C  FR={ovr["fr"]:.0f}°C  RL={ovr["rl"]:.0f}°C  RR={ovr["rr"]:.0f}°C')
+        if rr_bad:
+            o.append(f'> ⚠️ **TireTempRearRight 全程與 RL 完全相同（FH5 已知 bug）**——本場 RR 視為不可信，後胎統計改以 RL 單值代表，左右後差不輸出。')
+            o.append('')
+            o.append(f'排除暖胎後{skip_note}的平均：FL={ovr["fl"]:.0f}°C  FR={ovr["fr"]:.0f}°C  RL={ovr["rl"]:.0f}°C  RR=n/a (mirrors RL)')
+        else:
+            o.append(f'排除暖胎後{skip_note}的平均：FL={ovr["fl"]:.0f}°C  FR={ovr["fr"]:.0f}°C  RL={ovr["rl"]:.0f}°C  RR={ovr["rr"]:.0f}°C')
         o.append('')
         o.append(f'- 前胎平均：**{ovr["front_avg"]:.0f}°C**')
-        o.append(f'- 後胎平均：**{ovr["rear_avg"]:.0f}°C**')
+        rear_label = '後胎（RL，RR 不可信）' if rr_bad else '後胎平均'
+        o.append(f'- {rear_label}：**{ovr["rear_avg"]:.0f}°C**')
         o.append(f'- 前後溫差：**{ovr["fr_delta"]:+.1f}°C**')
-        o.append(f'- 左右前差：{ovr["lr_front_delta"]:+.1f}°C  /  左右後差：{ovr["lr_rear_delta"]:+.1f}°C')
+        if rr_bad:
+            o.append(f'- 左右前差：{ovr["lr_front_delta"]:+.1f}°C  /  左右後差：n/a')
+        else:
+            o.append(f'- 左右前差：{ovr["lr_front_delta"]:+.1f}°C  /  左右後差：{ovr["lr_rear_delta"]:+.1f}°C')
         o.append(f'- 最熱角：**{tires["hottest_corner"].upper()}**（{ovr[tires["hottest_corner"]]:.0f}°C）')
         o.append('')
         o.append('**判讀指南**：')
         o.append('- 前後差 > +10°C → 推頭（understeer），考慮降前胎壓 / 軟前防傾 / 加前外傾')
         o.append('- 前後差 < -10°C → 轉向過度（oversteer），考慮降後胎壓 / 軟後防傾 / 加後外傾')
-        o.append('- 左右差 > 5°C → 配重不平衡或單側過度負重，檢查彎道分布')
-        o.append('- 單一角 > 200°C → 胎面熱衰退，需要更多冷卻（降胎壓 / 加 caster）')
+        if not rr_bad:
+            o.append('- 左右差 > 5°C → 配重不平衡或單側過度負重，檢查彎道分布')
+        o.append('- 單一角 > 100°C → 胎面熱衰退，需要更多冷卻（降胎壓 / 加 caster）')
         o.append('')
         o.append('每段詳細：')
         o.append('')
@@ -3002,7 +3058,14 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
                         else 'RPM ≥ 80% 紅線（fallback）')
     o.append(f'動力區範圍：{drvtrn["power_band_start"]:.0f}–{drvtrn["power_band_end"]:.0f} RPM（基準：{band_basis_label}）')
     o.append('')
-    o.append(f'- 平均換檔點：**{drvtrn["avg_shift_rpm"]:.0f} RPM**（距理想 {drvtrn["shift_loss_rpm"]:+.0f}）')
+    _loss = drvtrn["shift_loss_rpm"]  # = ideal - avg；正數 = 低於理想（早換），負數 = 高於理想（晚換）
+    if abs(_loss) < 1:
+        _shift_label = '與理想一致'
+    elif _loss > 0:
+        _shift_label = f'低於理想 {_loss:.0f} RPM，換得早'
+    else:
+        _shift_label = f'高於理想 {-_loss:.0f} RPM，換得晚'
+    o.append(f'- 平均換檔點：**{drvtrn["avg_shift_rpm"]:.0f} RPM**（{_shift_label}）')
     o.append(f'- 全程在動力區的時間：**{drvtrn["in_power_band_pct"]:.1f}%**')
     o.append(f'- 全程在 ≥ 理想換檔點的時間：{drvtrn["in_redline_pct"]:.1f}%')
     o.append(f'- 全程曾達到的最高 RPM：{drvtrn["max_rpm_seen"]:.0f}（{drvtrn["max_rpm_seen"] / drvtrn["engine_max"] * 100:.1f}% EngineMaxRpm）')
@@ -3010,11 +3073,18 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     if drvtrn["shift_points"]:
         o.append('每檔換檔詳細：')
         o.append('')
-        o.append('| 換檔 | 平均 RPM | 距理想 | 次數 |')
-        o.append('|------|---------|-------|------|')
+        o.append('| 換檔 | 平均 RPM | 偏離理想 | 次數 |')
+        o.append('|------|---------|---------|------|')
         for (g_from, g_to), pts in sorted(drvtrn["shift_points"].items()):
             avg = statistics.mean(pts)
-            o.append(f'| {g_from}→{g_to} | {avg:.0f} | {drvtrn["ideal_shift"] - avg:+.0f} | {len(pts)} |')
+            diff = drvtrn["ideal_shift"] - avg  # 正 = 低於理想
+            if abs(diff) < 1:
+                diff_cell = '一致'
+            elif diff > 0:
+                diff_cell = f'低 {diff:.0f}'
+            else:
+                diff_cell = f'高 {-diff:.0f}'
+            o.append(f'| {g_from}→{g_to} | {avg:.0f} | {diff_cell} | {len(pts)} |')
         o.append('')
     o.append('每檔停留時間：')
     o.append('')
@@ -3082,7 +3152,8 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     o.append(f'| 煞車最大 | {inputs["brake_max"]}/255 |')
     o.append(f'| 煞車平均 | {inputs["brake_avg"]:.1f}/255 |')
     o.append(f'| 全煞車（≥250） | {inputs["brake_full_pct"]:.1f}% |')
-    o.append(f'| Trail braking（油門 + 煞車同時 >50） | {inputs["trail_brake_pct"]:.1f}% |')
+    o.append(f'| Trail braking（煞車 >50 + \\|latG\\| > 0.4，帶煞入彎） | {inputs["trail_brake_pct"]:.1f}%（占有煞車 packet {inputs["trail_brake_share_of_braking"]:.0f}%） |')
+    o.append(f'| 油煞同踩（油門 + 煞車同時 >50，左腳煞車或誤踩） | {inputs["brake_throttle_overlap_pct"]:.1f}% |')
     o.append(f'| 滑行（油門/煞車都 <5） | {inputs["coast_pct"]:.1f}% |')
     o.append(f'| 轉向最大 | ±{inputs["steer_max"]}/127 |')
     o.append(f'| 轉向平均（絕對值） | {inputs["steer_avg_abs"]:.1f}/127 |')
@@ -3457,7 +3528,8 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     o.append('')
     o.append('symptoms:')
     if tires["overall"]:
-        o.append(f'  tire_temps  : FL={tires["overall"]["fl"]:.0f} FR={tires["overall"]["fr"]:.0f} RL={tires["overall"]["rl"]:.0f} RR={tires["overall"]["rr"]:.0f} (front-rear delta {tires["overall"]["fr_delta"]:+.1f}°C)')
+        rr_str = 'unreliable[mirrors_RL]' if tires.get("rr_unreliable") else f'{tires["overall"]["rr"]:.0f}'
+        o.append(f'  tire_temps  : FL={tires["overall"]["fl"]:.0f} FR={tires["overall"]["fr"]:.0f} RL={tires["overall"]["rl"]:.0f} RR={rr_str} (front-rear delta {tires["overall"]["fr_delta"]:+.1f}°C, units=°C)')
     if slip["per_segment"]:
         ratios = [r["fr_max"] / r["rr_max"] for r in slip["per_segment"] if r["rr_max"] > 0]
         if ratios:
@@ -3473,7 +3545,7 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
     o.append(f'  rpm_observed: max={rpm_obs["max"]:.0f}, p99={rpm_obs["p99"]:.0f}, p95={rpm_obs["p95"]:.0f}, engine_max={rpm_obs["engine_max"]:.0f}'
              + (' [hard_limiter≠redline]' if rpm_obs["warn_hard_limiter"] else ''))
     o.append(f'  drivetrain  : avg_shift={drvtrn["avg_shift_rpm"]:.0f} RPM (ideal {drvtrn["ideal_shift"]:.0f} basis={drvtrn["ideal_shift_basis"]}, loss {drvtrn["shift_loss_rpm"]:+.0f}), in_power_band={drvtrn["in_power_band_pct"]:.0f}% basis={drvtrn["power_band_basis"]}')
-    o.append(f'  inputs      : throttle_full={inputs["throttle_full_pct"]:.0f}%, brake_max={inputs["brake_max"]}/255 {"(BRAKING_ASSIST?)" if inputs["brake_appears_disabled"] else ""}, trail_brake={inputs["trail_brake_pct"]:.1f}%, coast={inputs["coast_pct"]:.1f}%')
+    o.append(f'  inputs      : throttle_full={inputs["throttle_full_pct"]:.0f}%, brake_max={inputs["brake_max"]}/255 {"(BRAKING_ASSIST?)" if inputs["brake_appears_disabled"] else ""}, trail_brake={inputs["trail_brake_pct"]:.1f}% (share_of_braking={inputs["trail_brake_share_of_braking"]:.0f}%), brake_throttle_overlap={inputs["brake_throttle_overlap_pct"]:.1f}%, coast={inputs["coast_pct"]:.1f}%')
     o.append(f'  g_force     : lat_max={gforces["max_lateral_g_clean"]:.2f} (with_crash={gforces["max_lateral_g_with_crash"]:.2f}), '
              f'decel_max={gforces["max_decel_g_clean"]:.2f} (with_crash={gforces["max_decel_g_with_crash"]:.2f}), '
              f'accel_max={gforces["max_accel_g"]:.2f}')
