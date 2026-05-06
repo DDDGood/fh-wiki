@@ -3,7 +3,7 @@
 > 本索引列出 `Docs/wiki/` 下所有精煉攻略，依 `_category.yml` 分類排序。
 > 靜態網站部署後亦可透過側邊欄瀏覽；此檔供離線／GitHub 直接查閱之用。
 
-**最後更新**：2026-05-05（新增駕駛分類三檔：煞車技巧 / 越野駕駛技巧 / 進階練習小技巧）
+**最後更新**：2026-05-06（駕駛分類新增「常見彎型走線」「賽道地形與路面」兩檔；賽車線與彎道基礎新增 §五 Early Apex；補列小包子 FH5 進階技術系列來源）
 
 ---
 
@@ -80,12 +80,14 @@
 
 | 檔案 | 一句話 |
 |------|--------|
-| [賽車線與彎道基礎](wiki/driving/賽車線與彎道基礎.md) | Racing Line / Geometric vs Ideal Line / Apex / Late Apex / Healthy Oversteer / Slip vs Steering Angle |
-| [煞車技巧](wiki/driving/煞車技巧.md) | 入彎煞車三大壞習慣 / 重煞→平順鬆煞 / 重量轉移路徑前→外→後 / Trail Braking |
+| [賽車線與彎道基礎](wiki/driving/賽車線與彎道基礎.md) | Racing Line / Geometric vs Ideal Line / Apex / Late Apex / **Early Apex** / Healthy Oversteer / Slip vs Steering Angle |
+| [常見彎型走線](wiki/driving/常見彎型走線.md) ⭐ | 直角彎 / U 弯（大/小+雙彎心）/ V 弯 / 掉頭彎走法 + FH5 賽道實例（黃金驛站、瞭望台、吉娃娃、大教堂、火山衝刺賽）+ 檔位建議 |
+| [煞車技巧](wiki/driving/煞車技巧.md) | 入彎煞車三大壞習慣 / 重煞→平順鬆煞 / 重量轉移路徑前→外→後 / Trail Braking / Forza 輔助線紅區判斷煞車點 |
+| [賽道地形與路面](wiki/driving/賽道地形與路面.md) | 上下側傾（飛坡、坡頂鬆油）/ 左右側傾（傾斜彎道借力，側向 G 2→2.5）/ 路面物體硬軟件 / 凹陷凸起 + FH5 賽道實例（大教堂、穆萊赫、墨西哥環道、翡翠環道） |
 | [漂移基礎](wiki/driving/漂移基礎.md) | 前置設定 + 駕駛技巧 + 排錯（HokiHoshi 2021 漂移完整指南濃縮） |
 | [RWD 駕駛技巧](wiki/driving/RWD駕駛技巧.md) | meta 背景 / Launch / 過彎重量管理 / 不要彎太多 |
 | [越野駕駛技巧](wiki/driving/越野駕駛技巧.md) | Grip zone / 受控 oversteer 入彎 / 跨彎重量管理 |
-| [進階練習小技巧](wiki/driving/進階練習小技巧.md) | Drafting / Throttle/Steering Feathering / 慢車練習法 / Rivals 自我幽靈練習 |
+| [進階練習小技巧](wiki/driving/進階練習小技巧.md) | Drafting / Throttle/Steering Feathering（含彎心場景：手柄半開／鍵盤連點）/ 慢車練習法 / Rivals 自我幽靈練習 |
 
 ---
 
@@ -122,6 +124,12 @@ _尚無內容。_
 - [地平線5_萌新攻略第九期_自定義調校數值公式](_sources/地平線5_萌新攻略第九期_自定義調校數值公式_整理版.md) — 公式派
 - [地平線5_QuickTune完整調校指南](_sources/地平線5_QuickTune完整調校指南_整理版.md) — 系統性矩陣（QuickTune 系列檔）
 - [地平線5-硬核調校指南](_sources/地平線5-硬核調校指南_整理版.md) — 硬核派完整矩陣
+
+#### 小包子 FH5 技術進階系列
+- [小包子 FH5 技術進階1：四大主流胎系特性](_sources/小包子_FH5_技術進階1_四大主流胎系特性_整理版.md) — 熱熔／直線／拉力／漂移四胎系特性與代表車輛
+- [小包子 FH5 技術進階5：彎道講解1 早晚彎心與直角彎](_sources/小包子_FH5_技術進階5_彎道講解1_早晚彎心與直角彎_整理版.md) — 早彎心三段分法、外內外物理原理、直角彎拆解
+- [小包子 FH5 技術進階6：彎道講解2 UV型彎過法](_sources/小包子_FH5_技術進階6_彎道講解2_UV型彎過法_整理版.md) — 大 U 雙彎心、小 U 含檔位動作分解、V 弯不超車、掉頭彎失誤
+- [小包子 FH5 技術進階7 番外：地形對車輛的影響](_sources/小包子_FH5_技術進階7_番外_地形對車輛的影響_整理版.md) — 上下/左右側傾、路面硬軟件、凹陷凸起 + 5 處 FH5 賽道實例
 
 ### 英文社群（HokiHoshi）
 - [HokiHoshi FH5 2025 改裝速成](_sources/HokiHoshi_FH5_2025改裝速成_整理版.md)
