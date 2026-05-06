@@ -209,6 +209,186 @@ def _classify_yaw_balance(actual_yaw: float, lat_acc: float, speed: float,
     return (None, None, ratio)  # balanced
 
 
+# === 單彎駕駛操作診斷（給 corners_detail 的 per-corner 區塊用）===
+# 門檻設計參考 Docs/corners_report_improvement_plan.md。Steer 為 int8 -127..127。
+DOWNSHIFT_HEAVY_BRAKE = 150   # 降檔當下 Brake > 此值 → 重煞中降檔
+DOWNSHIFT_TURN_STEER = 15     # |Steer| > 此值 → 轉向中降檔
+DOWNSHIFT_RAPID_GAP_S = 0.30  # 兩次降檔間隔 < 此秒數 → 連降過密
+BRAKE_RELEASE_LATE = 120      # 開始轉向時 Brake > 此值 → 煞車釋放偏慢
+BRAKE_APEX_PRE_HEAVY = 80     # Apex 前 0.5s Brake > 此值 → 入彎處理偏晚
+THROTTLE_EARLY_PRE_APEX = 150 # Apex 前 0.3s Accel > 此值 → 過早補油
+THROTTLE_FULL = 240           # Accel >= 此值 → 視為「已踩到底」（避免 250 卡邊）
+STEER_BIG = 20                # |Steer| > 此值 → 大方向角
+STEER_TURN_START = 10         # |Steer| > 此值 → 視為「已開始轉向」
+
+
+def _compute_downshift_events(in_pkts: list, t0: float) -> list[dict]:
+    """偵測本彎內所有降檔事件並標記情境（重煞中 / 轉向中 / 跳檔 / 連降過密）。
+
+    跳檔（一次退多檔，例如 5→3）：from - to >= 2 視為跳檔，標記 N。
+    """
+    events: list[dict] = []
+    for i in range(1, len(in_pkts)):
+        prev_g = I(in_pkts[i - 1], 'Gear')
+        cur_g = I(in_pkts[i], 'Gear')
+        if cur_g >= prev_g:
+            continue
+        if cur_g < 1:  # 跳過 R/N（0 / 負）
+            continue
+        r = in_pkts[i]
+        crt = F(r, 'CurrentRaceTime')
+        brake = I(r, 'Brake')
+        steer = I(r, 'Steer')
+        gear_drop = prev_g - cur_g
+        tags: list[str] = []
+        if brake > DOWNSHIFT_HEAVY_BRAKE:
+            tags.append('重煞中')
+        if abs(steer) > DOWNSHIFT_TURN_STEER:
+            tags.append('轉向中')
+        if gear_drop >= 2:
+            tags.append(f'跳 {gear_drop} 檔')
+        events.append({
+            't_rel': crt - t0,
+            'from_gear': prev_g, 'to_gear': cur_g,
+            'gear_drop': gear_drop,
+            'speed_kmh': F(r, 'Speed') * 3.6,
+            'brake': brake, 'steer': steer,
+            'tags': tags,
+        })
+    # 連降過密：相鄰降檔事件間隔 < DOWNSHIFT_RAPID_GAP_S
+    for i in range(1, len(events)):
+        if events[i]['t_rel'] - events[i - 1]['t_rel'] < DOWNSHIFT_RAPID_GAP_S:
+            events[i]['tags'].append('連降過密')
+    return events
+
+
+def _compute_brake_release(in_pkts: list, apex_local_idx: int) -> dict:
+    """煞車釋放分析：找關鍵幀的 brake 值，判斷是否釋放偏慢。
+
+    回傳：
+        peak_brake：彎內最大 brake
+        peak_brake_t_rel：最大 brake 發生時相對 entry 的秒數（用於 0 brake corner 偵測）
+        steer_start_brake：首次 |Steer| > STEER_TURN_START 時的 brake（None 若該幀不存在）
+        apex_pre_05s_brake：apex 前 0.5s（30 packet）的 brake
+        apex_brake：apex 那一幀的 brake
+        late_release：steer_start_brake > BRAKE_RELEASE_LATE
+        late_apex_pre：apex_pre_05s_brake > BRAKE_APEX_PRE_HEAVY
+    """
+    brakes = [I(r, 'Brake') for r in in_pkts]
+    steers = [I(r, 'Steer') for r in in_pkts]
+    if not brakes:
+        return {}
+    peak_brake = max(brakes)
+    peak_brake_idx = brakes.index(peak_brake)
+
+    # 首次「明顯轉向」幀的 brake 值
+    steer_start_brake: int | None = None
+    for i, s in enumerate(steers):
+        if abs(s) > STEER_TURN_START:
+            steer_start_brake = brakes[i]
+            break
+
+    apex_pre_idx = max(0, apex_local_idx - 30)  # 0.5s = 30 packet @ 60Hz
+    apex_pre_05s_brake = brakes[apex_pre_idx]
+    apex_brake = brakes[apex_local_idx] if apex_local_idx < len(brakes) else 0
+
+    late_release = (steer_start_brake is not None
+                    and steer_start_brake > BRAKE_RELEASE_LATE)
+    late_apex_pre = apex_pre_05s_brake > BRAKE_APEX_PRE_HEAVY
+
+    return {
+        'peak_brake': peak_brake,
+        'peak_brake_t_rel': peak_brake_idx / 60.0,
+        'steer_start_brake': steer_start_brake,
+        'apex_pre_05s_brake': apex_pre_05s_brake,
+        'apex_brake': apex_brake,
+        'late_release': late_release,
+        'late_apex_pre': late_apex_pre,
+    }
+
+
+def _compute_throttle_recovery(in_pkts: list, apex_local_idx: int,
+                                front_slip: list[float],
+                                corner_steer_max: int) -> dict:
+    """油門恢復分析：apex 前後油門/方向角組合，判斷是否過早補油或方向未回正全油。
+
+    early_throttle 三條件同時成立才算「過早補油」：
+      (1) 該彎玩家有收油（throttle min < 100，否則 sweeper 全油過彎會誤觸發）
+      (2) Apex 前 0.3s throttle > THROTTLE_EARLY_PRE_APEX（150）
+      (3) 此時 (|steer| > corner_steer_max × 0.5  OR  front slip > 0.7)
+          ——確認玩家此時仍在「committed to turn-in」狀態，不是長彎裡已經
+          開始 unwind 才補油。沒有(3)會把長彎尾段準備出彎的合理動作誤判。
+    """
+    throttles = [I(r, 'Accel') for r in in_pkts]
+    steers = [I(r, 'Steer') for r in in_pkts]
+    if not throttles:
+        return {}
+    throttle_min = min(throttles)
+    has_lift = throttle_min < 100
+
+    apex_throttle = throttles[apex_local_idx] if apex_local_idx < len(throttles) else 0
+    exit_05s_idx = min(len(throttles) - 1, apex_local_idx + 30)
+    exit_05s_throttle = throttles[exit_05s_idx]
+
+    # 過早補油：三條件 AND
+    pre_apex_03s_idx = max(0, apex_local_idx - 18)  # 0.3s = 18 packet
+    pre_apex_03s_throttle = throttles[pre_apex_03s_idx]
+    pre_apex_steer = abs(steers[pre_apex_03s_idx])
+    pre_apex_front_slip = (front_slip[pre_apex_03s_idx]
+                           if pre_apex_03s_idx < len(front_slip) else 0.0)
+    steer_committed_thr = corner_steer_max * 0.5 if corner_steer_max > 0 else 1e9
+    still_loaded = (pre_apex_steer > steer_committed_thr
+                    or pre_apex_front_slip > YAW_SLIP_CONFIRM_THRESHOLD)
+    early_throttle = (has_lift
+                      and pre_apex_03s_throttle > THROTTLE_EARLY_PRE_APEX
+                      and still_loaded)
+
+    # 全油門時的方向角：apex 之後首次 Accel >= THROTTLE_FULL 的那一幀
+    steer_at_full: int | None = None
+    full_throttle_idx: int | None = None
+    for k in range(apex_local_idx, len(throttles)):
+        if throttles[k] >= THROTTLE_FULL:
+            steer_at_full = abs(steers[k])
+            full_throttle_idx = k
+            break
+    full_with_steer = (has_lift and steer_at_full is not None
+                       and steer_at_full > STEER_BIG)
+
+    return {
+        'apex_throttle': apex_throttle,
+        'exit_05s_throttle': exit_05s_throttle,
+        'pre_apex_03s_throttle': pre_apex_03s_throttle,
+        'pre_apex_steer': pre_apex_steer,
+        'pre_apex_front_slip': pre_apex_front_slip,
+        'steer_at_full_throttle': steer_at_full,  # None if never reached full
+        'full_throttle_t_rel': (full_throttle_idx / 60.0
+                                if full_throttle_idx is not None else None),
+        'has_lift': has_lift,
+        'early_throttle': early_throttle,
+        'full_throttle_with_steer': full_with_steer,
+    }
+
+
+def _compute_steer_summary(in_pkts: list) -> dict:
+    """方向操作摘要：max steer + 大方向角持續秒數（|Steer| > STEER_BIG 最長連續區段）。"""
+    steers = [abs(I(r, 'Steer')) for r in in_pkts]
+    if not steers:
+        return {'max_steer': 0, 'sustained_big_steer_s': 0.0}
+    max_steer = max(steers)
+    longest = 0
+    cur = 0
+    for s in steers:
+        if s > STEER_BIG:
+            cur += 1
+            longest = max(longest, cur)
+        else:
+            cur = 0
+    return {
+        'max_steer': max_steer,
+        'sustained_big_steer_s': longest / 60.0,
+    }
+
+
 def dedupe_attempts(rows: list) -> tuple[list, int]:
     """Rewind-aware filter：對每個 CRT 時刻只保留**錄製時間最晚**的 packet。
 
@@ -1571,6 +1751,14 @@ def analyze_corners(valid_rows: list) -> dict:
         # 是否為「過彎太多」問題彎
         is_overturn_corner = exit_overturn_packets >= EXIT_OVERTURN_MIN_PACKETS
 
+        # === 單彎駕駛操作診斷（給 corners_detail per-corner 區塊 + summary 聚合）===
+        t0_corner = F(valid_rows[start], 'CurrentRaceTime')
+        downshift_events = _compute_downshift_events(in_corner_pkts, t0_corner)
+        brake_release_info = _compute_brake_release(in_corner_pkts, apex_local_idx)
+        throttle_recovery_info = _compute_throttle_recovery(
+            in_corner_pkts, apex_local_idx, front_slip, corner_steer_max)
+        steer_summary_info = _compute_steer_summary(in_corner_pkts)
+
         corners.append({
             "start": start, "end": end,
             "apex_global": start + apex_local_idx,
@@ -1626,6 +1814,11 @@ def analyze_corners(valid_rows: list) -> dict:
             "us_confirmed_packets": pkt_us_confirmed,  # yaw + slip 雙確認
             "os_confirmed_packets": pkt_os_confirmed,
             "top_imbalance": top_imbalance,
+            # === 單彎駕駛操作診斷 ===
+            "downshift_events": downshift_events,
+            "brake_release": brake_release_info,
+            "throttle_recovery": throttle_recovery_info,
+            "steer_summary": steer_summary_info,
         })
 
     if not corners:
@@ -1734,6 +1927,25 @@ def analyze_corners(valid_rows: list) -> dict:
         # 過渡彎定義：相鄰兩彎方向相反，且 end_i → start_{i+1} 間距 < 1.0s（60 packet）
         # 過渡彎有問題：兩彎中至少一彎 us 或 os 顯著高於該段所有彎平均
         **_analyze_s_transitions(corners),
+        # === 駕駛操作聚合（per-corner 診斷彙總；對應 corners_detail 的單彎區塊）===
+        "heavy_brake_downshifts": sum(
+            sum(1 for e in c["downshift_events"] if '重煞中' in e['tags'])
+            for c in corners),
+        "in_turn_downshifts": sum(
+            sum(1 for e in c["downshift_events"] if '轉向中' in e['tags'])
+            for c in corners),
+        "rapid_downshifts": sum(
+            sum(1 for e in c["downshift_events"] if '連降過密' in e['tags'])
+            for c in corners),
+        "total_downshifts": sum(len(c["downshift_events"]) for c in corners),
+        "late_brake_release_corners": sum(
+            1 for c in corners if c["brake_release"].get("late_release")),
+        "late_apex_pre_brake_corners": sum(
+            1 for c in corners if c["brake_release"].get("late_apex_pre")),
+        "early_throttle_corners": sum(
+            1 for c in corners if c["throttle_recovery"].get("early_throttle")),
+        "full_throttle_with_steer_corners": sum(
+            1 for c in corners if c["throttle_recovery"].get("full_throttle_with_steer")),
     }
 
 
@@ -1876,6 +2088,15 @@ def _emit_corner_table(valid_rows: list, c: dict, n: int, label_prefix: str,
         for line in extras:
             out.append(line)
     out.append('')
+
+    # === 駕駛操作診斷區塊（降檔 / 煞車釋放 / 油門恢復 / 方向角）===
+    out.extend(_emit_corner_diagnostics(c, t0))
+
+    # === 逐幀資料表（折疊，預設收起；估算行數 ≈ (PRE+POST+corner_pkts) / STEP）===
+    n_frame_rows_est = (sample_end - sample_start) // STEP + 1
+    out.append('<details>')
+    out.append(f'<summary>逐幀資料表（約 {n_frame_rows_est} 行 ≈ {(sample_end - sample_start) / 60:.1f}s · 點開查看）</summary>')
+    out.append('')
     out.append('| phase | t-rel (s) | 速度 (km/h) | RPM | latG | 油門 | 煞車 | 檔 | 方向 | 前slip | 後slip | 備註 |')
     out.append('|-------|-----------|-------------|-----|------|------|------|----|------|--------|--------|------|')
 
@@ -1932,7 +2153,118 @@ def _emit_corner_table(valid_rows: list, c: dict, n: int, label_prefix: str,
         prev_kmh = kmh
         prev_crt = crt
     out.append('')
+    out.append('</details>')
+    out.append('')
     return out
+
+
+def _emit_corner_diagnostics(c: dict, t0: float) -> list[str]:
+    """Emit per-corner diagnostic blocks (降檔 / 煞車釋放 / 油門恢復 / 方向操作）.
+
+    所有判斷使用整場一致的閾值（DOWNSHIFT_*, BRAKE_*, THROTTLE_*, STEER_*），
+    推頭/過度則用整場 yaw-rate 法的同源欄位（us_*_packets, os_*_packets,
+    entry_us, mid_us, exit_us），不重新發明 slip-angle ratio 法。
+
+    任何小區塊資料不足時跳過該區塊（例如該彎沒有降檔事件、玩家全程沒收油等），
+    不留空標題。
+    """
+    lines: list[str] = []
+
+    # ---- 降檔事件 ----
+    events = c.get('downshift_events') or []
+    if events:
+        lines.append('### 降檔事件')
+        lines.append('')
+        lines.append('| t-rel | 換檔 | Δ檔 | speed | brake | steer | 標記 |')
+        lines.append('|------:|------|----:|------:|------:|------:|------|')
+        for e in events:
+            tag_str = ' / '.join(e['tags']) if e['tags'] else '—'
+            # 跳檔在 Δ 欄位用 **粗體** 視覺強調
+            delta_cell = f'**−{e["gear_drop"]}**' if e['gear_drop'] >= 2 else f'−{e["gear_drop"]}'
+            lines.append(f'| {e["t_rel"]:+.2f} | **{e["from_gear"]} → {e["to_gear"]}** | {delta_cell} | '
+                         f'{e["speed_kmh"]:.0f} km/h | {e["brake"]} | {e["steer"]:+d} | {tag_str} |')
+        lines.append('')
+
+    # ---- 煞車釋放 ----
+    br = c.get('brake_release') or {}
+    if br:
+        lines.append('### 煞車釋放')
+        lines.append('')
+        peak = br['peak_brake']
+        if peak == 0:
+            lines.append('- 彎內全程無煞車（lift-and-coast 或全油過彎）')
+        else:
+            lines.append(f'- 最大煞車：{peak}')
+            ssb = br['steer_start_brake']
+            if ssb is None:
+                lines.append('- 開始轉向時：彎內無顯著轉向（|Steer| ≤ 10）')
+            else:
+                tag = '⚠️ 偏慢' if br['late_release'] else 'OK'
+                lines.append(f'- 開始轉向時 brake：**{ssb}**（門檻 {BRAKE_RELEASE_LATE} → {tag}）')
+            tag2 = '⚠️ 偏晚' if br['late_apex_pre'] else 'OK'
+            lines.append(f'- Apex 前 0.5s brake：**{br["apex_pre_05s_brake"]}**（門檻 {BRAKE_APEX_PRE_HEAVY} → {tag2}）')
+            lines.append(f'- Apex brake：{br["apex_brake"]}')
+        lines.append('')
+
+    # ---- 油門恢復 ----
+    tr = c.get('throttle_recovery') or {}
+    if tr:
+        lines.append('### 油門恢復')
+        lines.append('')
+        if not tr['has_lift']:
+            lines.append('- 彎內未明顯收油（throttle min ≥ 100）→ 早補油 / 全油有方向 判斷略過')
+        else:
+            # 過早補油需「throttle 高 + 此時還在 turn-in（steer 高 OR slip 高）」
+            tag_e = '⚠️ 過早' if tr['early_throttle'] else 'OK'
+            ps = tr.get('pre_apex_steer', 0)
+            pfs = tr.get('pre_apex_front_slip', 0.0)
+            lines.append(f'- Apex 前 0.3s throttle：**{tr["pre_apex_03s_throttle"]}** '
+                         f'· 此時 |steer|={ps}、front slip={pfs:.2f} → {tag_e}')
+            lines.append(f'- Apex throttle：{tr["apex_throttle"]}')
+            lines.append(f'- Apex 後 0.5s throttle：{tr["exit_05s_throttle"]}')
+            saf = tr['steer_at_full_throttle']
+            if saf is None:
+                lines.append(f'- 全油門（≥ {THROTTLE_FULL}）：彎內未達到')
+            else:
+                tag_f = '⚠️ 方向未回正' if tr['full_throttle_with_steer'] else 'OK'
+                lines.append(f'- 達到全油門時 |steer|：**{saf}**（門檻 {STEER_BIG} → {tag_f}）')
+        lines.append('')
+
+    # ---- 方向操作（用整場一致的 yaw-rate 法資料）----
+    ss = c.get('steer_summary') or {}
+    if ss:
+        lines.append('### 方向操作')
+        lines.append('')
+        lines.append(f'- 最大方向角：±{ss["max_steer"]}（觀測尺 0-127）')
+        lines.append(f'- 大方向角持續（|Steer| > {STEER_BIG}）：最長 {ss["sustained_big_steer_s"]:.2f}s')
+        # yaw-rate 法 US/OS（與整場 § 8 同源，避免內部矛盾）
+        us_mod = c.get('us_moderate_packets', 0)
+        us_sev = c.get('us_severe_packets', 0)
+        us_conf = c.get('us_confirmed_packets', 0)
+        os_mod = c.get('os_moderate_packets', 0)
+        os_sev = c.get('os_severe_packets', 0)
+        os_conf = c.get('os_confirmed_packets', 0)
+        if us_mod + os_mod > 0:
+            lines.append(f'- 推頭 packet（yaw-rate 法）：moderate+ {us_mod} / severe {us_sev}'
+                         f' / 雙確認 {us_conf}（slip ≥ {YAW_SLIP_CONFIRM_THRESHOLD}）')
+            lines.append(f'- 過度 packet（yaw-rate 法）：moderate+ {os_mod} / severe {os_sev}'
+                         f' / 雙確認 {os_conf}')
+            # 主要發生在哪一段
+            phases = []
+            for label, key in [('入彎', 'entry'), ('中段', 'mid'), ('出彎', 'exit')]:
+                pkts = c.get(f'{key}_pkts', 0) or 1
+                u = c.get(f'{key}_us', 0)
+                o = c.get(f'{key}_os', 0)
+                if u + o == 0:
+                    continue
+                phases.append(f'{label} US{u}/OS{o}（{(u + o) / pkts * 100:.0f}%）')
+            if phases:
+                lines.append(f'- 三段切片：{" · ".join(phases)}')
+        else:
+            lines.append('- yaw-rate 法：本彎內未偵測到 moderate 以上 US/OS')
+        lines.append('')
+
+    return lines
 
 
 def generate_corners_detail(valid_rows: list, corners_result: dict) -> str | None:
@@ -3450,6 +3782,39 @@ def build_report(session_dir: Path) -> tuple[str, str | None]:
             if ot > 0:
                 tot = corners.get("exit_overturn_total_packets", 0)
                 o.append(f'- **出彎彎太多 + 加油太早**：**{ot}/{corners["count"]} 個彎**（共 {tot} packet ≈ {tot/60:.1f}s 過 apex 後仍 ≥ 50% max 轉向 + Accel ≥ 128） → 駕駛習慣，過 apex 後**先放方向盤再加油**')
+            o.append('')
+
+        # === 駕駛操作摘要（per-corner 診斷的整場聚合）===
+        # 對應 corners_detail.md 每個彎內的「降檔事件 / 煞車釋放 / 油門恢復」區塊。
+        # 數字後不下「偏多/需要改善」的解讀（讓 race-analyst skill 結合 wiki 編輯）。
+        n = corners["count"]
+        n_shifts = corners.get("total_downshifts", 0)
+        n_heavy = corners.get("heavy_brake_downshifts", 0)
+        n_turn = corners.get("in_turn_downshifts", 0)
+        n_rapid = corners.get("rapid_downshifts", 0)
+        n_late_br = corners.get("late_brake_release_corners", 0)
+        n_late_apex = corners.get("late_apex_pre_brake_corners", 0)
+        n_early_th = corners.get("early_throttle_corners", 0)
+        n_full_steer = corners.get("full_throttle_with_steer_corners", 0)
+        if n_shifts + n_late_br + n_late_apex + n_early_th + n_full_steer > 0:
+            o.append('**駕駛操作摘要**（per-corner 事件彙總；逐彎細節見 [corners_detail.md](corners_detail.md)）：')
+            o.append('')
+            o.append('| 項目 | 數量 | 門檻 |')
+            o.append('|------|------|------|')
+            if n_shifts > 0:
+                o.append(f'| 重煞中降檔 | {n_heavy} 次 | brake > {DOWNSHIFT_HEAVY_BRAKE} 當下降檔 |')
+                o.append(f'| 轉向中降檔 | {n_turn} 次 | \\|steer\\| > {DOWNSHIFT_TURN_STEER} 當下降檔 |')
+                o.append(f'| 連降過密 | {n_rapid} 次 | 兩次降檔 < {DOWNSHIFT_RAPID_GAP_S}s |')
+            if n_late_br + n_late_apex > 0:
+                o.append(f'| 煞車釋放偏慢 | {n_late_br}/{n} 彎 | 開始轉向時 brake > {BRAKE_RELEASE_LATE} |')
+                o.append(f'| 入彎處理偏晚 | {n_late_apex}/{n} 彎 | Apex 前 0.5s brake > {BRAKE_APEX_PRE_HEAVY} |')
+            if n_early_th + n_full_steer > 0:
+                o.append(f'| Apex 前過早補油 | {n_early_th}/{n} 彎 | Apex 前 0.3s throttle > {THROTTLE_EARLY_PRE_APEX} 且仍在 turn-in（\\|steer\\| > 50% max 或 front slip > {YAW_SLIP_CONFIRM_THRESHOLD}） |')
+                o.append(f'| 全油時方向未回正 | {n_full_steer}/{n} 彎 | Accel ≥ {THROTTLE_FULL} 時 \\|steer\\| > {STEER_BIG} |')
+            o.append('')
+            o.append(f'> 總降檔次數：{n_shifts}（含彎前 / 彎內 / 彎後）。'
+                     '門檻設計於 summarize.py 頂部（DOWNSHIFT_* / BRAKE_* / THROTTLE_*），'
+                     '對症狀解讀請看 race-analyst skill 的逐彎建議。')
             o.append('')
 
         # Top 3 heaviest brake corners (notable but not exhaustive listing)

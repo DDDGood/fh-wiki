@@ -109,6 +109,7 @@ argument-hint: "<session 資料夾路徑或 summary.md 路徑，可省略則用�
    - `meta.json` 是結構化基本資訊
    - 兩者都讀完整內容（不要 head/tail）
    - **也讀 `corners_detail.md`（若存在）**——top 3 重煞車彎的逐幀資料
+   - **檢查 `meta.car.db.specs`**（從 `data/forza_telemetry/cars/{ordinal}.yml` 凍結進來的）：若存在，後續產出要寫「車輛規格基準」段落（見 Phase 4），讓 telemetry 數字有對照框架
 
 3. **如果 summary.md 不存在**：
    - 先跑 `python -m scripts.forza_telemetry.summarize <session 資料夾>` 產生
@@ -221,7 +222,29 @@ wiki 給的候選：
 
 收到答覆後納入推理。**不要假設玩家用預設值**——多數使用者都調過 tune。
 
-#### 6. 排優先級
+#### 6. 用 `tune_ranges` 做百分位診斷（彈簧 / 車高 / 空力）
+
+FH5 滑桿端點**因車而異**（Focus RS 彈簧上限 265、另一台車 165）——「彈簧 200 算硬」這種絕對基準會誤判。
+
+若 `meta.car.db.tune_ranges` 存在，**對該幾項**：
+```
+percentile = (current - min) / (max - min) * 100
+```
+
+輸出時帶上百分位資訊，例：
+- 「目前後彈簧 125（範圍 80-265 中的 24%，**偏軟那端**）→ 想再軟空間有限，建議改攻 ARB」
+- 「前空力 80（範圍 0-200 中的 40%，**中段偏低**）→ 還有上調空間」
+
+**沒有 `tune_ranges` 時**：退回「降 1-2 級」這類小步幅度建議，**不要編造範圍**。
+
+通用範圍（FH5 多數車一致，可寫死、不必逐車記）：
+- damping: 1-20
+- ARB: 1-65
+- 差速器（accel/decel/center）: 0-100
+- 剎車（balance/pressure）: 0-100
+- camber: -5.0 to 0.0（多數情境用負值）
+
+#### 7. 排優先級
 
 最終建議照下列順位排：
 1. **撞車 / 駕駛輔助設定異常** → 必先處理（沒乾淨資料調校沒意義）
@@ -238,6 +261,18 @@ wiki 給的候選：
 
 ```markdown
 # 賽事分析建議
+
+## 🚗 車輛規格基準
+（**僅當 `meta.car.db.specs` 存在時才寫此段**——讓後續 telemetry 數字有對照框架）
+
+| 規格 | 數值 | 本場 telemetry | 對照解讀 |
+|------|------|---------------|---------|
+| 推重比 | X.XX hp/kg（= power_hp / weight_kg） | — | （給類別參考：A 級典型 0.40-0.55 hp/kg） |
+| 極速 | Y km/h | summary 觀測 max Z km/h | 落差 N% → {齒比過短 / 齒比 OK / 賽道不夠長} |
+| 0-100 | A 秒 | （summary 沒直接記，可從 raw 推估或忽略） | — |
+| 極限側向 G | B G | summary 觀測 peak C G | 利用率 (C/B)×100% → {還有餘裕 / 接近極限 / 已超} |
+
+> 規格來源：`data/forza_telemetry/cars/{ordinal}.yml`（凍結於本場 session 的 meta.json）。
 
 ## 症狀總結
 （從 TL;DR 抽出，按嚴重度排序，每條 1 句話）

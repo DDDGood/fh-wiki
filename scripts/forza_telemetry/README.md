@@ -388,6 +388,13 @@ data/forza_telemetry/sessions/{YYYY-MM-DD_HH-MM-SS}_car{CarOrdinal}_PI{Performan
     "db": {
       "name": "Subaru BRZ 2013",
       "purpose": "軌跡",
+      "specs": {
+        "top_speed_kmh": 297.8,
+        "zero_to_100_s": 6.257,
+        "power_hp": 625,
+        "weight_kg": 1304,
+        "lateral_g": 1.13
+      },
       "tune": { "tires": { "pressure_front": 22.0, ... }, ... }
     }
   },
@@ -744,6 +751,8 @@ for r in rows[:10]:
 | 2026-05-04 | `start-telemetry-gui.bat` 移除中文 REM（cp950 解析錯誤再次踩坑） | 雙擊噴 `'?' 不是內部或外部命令`——`chcp 65001` 在 REM 解析後才執行已來不及。重申 CLAUDE.md 早記過的規則：**所有 .bat 必須純 ASCII** |
 | 2026-05-04 | GUI 加深色主題（VS Code Dark+ 配色）+ summary 預覽改用 markdown 渲染（自製 tag-based renderer，支援 headers / bold / code / table / hr / 條列）+ 字體大小可調（按鈕、Ctrl+滾輪、Ctrl+=/-/0），CLI 可 `--theme light` 切換 | 使用者反映原本白底 + 純文字 summary 不好讀；無外部依賴用 ttk `clam` theme + tk.Text tags 達成 |
 | 2026-05-04 | 新增 Tkinter GUI（`gui.py` + `start-telemetry-gui.bat`）：三分頁（狀態/賽事/車輛）、即時 snapshot 輪詢、強制錄製/強制停止、session 與 car 檔的 CRUD。recorder 加 `snapshot()` / `force_record()` / `force_stop()` 與封包速率追蹤 | 原本只有 console + 雙擊 bat，看不到當前狀態、無法快速瀏覽歷史 session、編輯 cars/*.yml 要打開檔案總管。GUI 把這些整合到單視窗，但保留 console 模式（兩者共用同一個 Recorder） |
+| 2026-05-04 | specs 區塊改回 imperial（hp + psi）；移除扭力欄位 | metric 模式胎壓變 bar，每次 ×14.5 心算太麻煩；扭力被推重比涵蓋且 FH5 imperial 顯示 kg·m 不直觀，砍掉一個欄位 |
+| 2026-05-04 | 車輛資料庫加 `specs` 區塊（極速/0-100/馬力/車重/側向G）；race-analyst skill Phase 4 加「車輛規格基準」段落，讓 telemetry 數值有對照框架（推重比、極速利用率、側向 G 餘裕） | 線上分析常引用「推重比」需要 power + weight；其他四項讓 race-analyst 能比對「summary 觀測 max 240 km/h vs 規格 297 → 齒比短」這類具體 reasoning |
 | 2026-05-04 | 新增車輛資料庫：`cars.py` loader + `data/forza_telemetry/cars/{ordinal}.yml` + session finalize 凍結 `car.db` 進 meta.json + summarize 顯示車名 + .gitignore 解除 cars/ 排除 | ordinal 數字無法人類辨識（car1564 是什麼？），且需要把每場 session 對應到當時的調校狀態才能做跨場比對。tune 歷史交給 git log，不在檔內維護陣列 |
 | 2026-05-03 | summarize.py 新增 `detect_crashes()` + 全域過濾：3 個獨立訊號（lateral G > 5×3 連續 / longitudinal G > 6 / 速度 50km/h 內掉 10 packet）+ ±0.5s 視窗排除 | Sprint 場 max lateral G **13.1G→4.15G**、max decel **20G→4.88G**——撞車 spike 嚴重污染 G-force / decel events / 懸吊觸底 / 滑移統計，過濾後數字才有調校意義 |
 | 2026-05-03 | summarize.py 過彎分析：加 `CORNER_MAX_RADIUS_M = 250` sweeper 過濾 | 環道彎數 18→14（剔除 4 個 sweeper），平均 Peak G 從 2.12 升到 2.54——把高速微彎從「彎中操控統計」剔除避免污染推頭比例與速度損失均值 |
