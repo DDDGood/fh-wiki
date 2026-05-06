@@ -124,7 +124,6 @@ related_cars: []
 pi_class: []
 game: FH5
 version: 未標註
-status: draft
 sources:
   - Docs/_sources/{source1}.md
   - Docs/_sources/{source2}.md
@@ -163,8 +162,7 @@ revisions:
 
 1. 寫入檔案。
 2. 更新 `Docs/wiki/{category}/index.md`（若存在）— 新檔加入清單。
-3. 若此分類是首度有 stable 文章 → 建議使用者未來補完時將 `status` 從 `draft` 升為 `stable`。
-4. 若專案 wiki 總檔數達到 5，且 `Docs/INDEX.md` 不存在 → 主動建立。
+3. 若專案 wiki 總檔數達到 5，且 `Docs/INDEX.md` 不存在 → 主動建立。
 
 ---
 
@@ -173,8 +171,7 @@ revisions:
 1. **沒有來源就不要寫**：如果 `_sources/` 裡對某主題資訊極少，告訴使用者「資料不足，建議先蒐集更多來源再寫」，而非硬湊。
 2. **不自己發明數值**：所有具體數值必須有來源引註。
 3. **不複寫既有 wiki 檔**：若目標路徑已存在，退回請使用者改用 `wiki-integrator` 做 MERGE 或換主題。
-4. **初稿一律 status: draft**：精煉後由使用者決定何時升級 stable。
-5. **每次只寫一份主題**：確保品質。
+4. **每次只寫一份主題**：確保品質。
 
 ---
 
@@ -184,7 +181,7 @@ revisions:
 |------|------|
 | 主題太泛（「調校」） | 請使用者聚焦，例：「調校基礎」「差速器調校」「S1 後驅甩尾調校」 |
 | 來源全無相關內容 | 告知「無可用來源」，建議先用 `knowledge-curator` 蒐集再寫 |
-| 來源只有一份 | 明示「本篇僅基於單一來源，觀點可能偏頗」並在 frontmatter status 設為 draft |
+| 來源只有一份 | 明示「本篇僅基於單一來源，觀點可能偏頗」 |
 | 多來源嚴重衝突 | 不硬綜合，保留併列 + 備註各自適用條件 |
 
 ---

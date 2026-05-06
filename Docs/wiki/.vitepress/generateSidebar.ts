@@ -48,15 +48,11 @@ export function generateSidebar() {
         return {
           text: fm.title || f.replace(/\.md$/, ''),
           link: `/${cat.slug}/${f.replace(/\.md$/, '')}`,
-          order: fm.order ?? 999,
-          status: fm.status || 'stable'
+          order: fm.order ?? 999
         }
       })
       .sort((a, b) => a.order - b.order || a.text.localeCompare(b.text, 'zh-Hant'))
-      .map(({ text, link, status }) => ({
-        text: status === 'draft' ? `${text} (草稿)` : text,
-        link
-      }))
+      .map(({ text, link }) => ({ text, link }))
 
     sidebar[`/${cat.slug}/`] = [
       {

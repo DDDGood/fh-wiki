@@ -240,7 +240,6 @@ related_cars: []              # 車型 ID 或通用類型；為空即表示通�
 pi_class: [A, S1]             # 適用 PI 等級；空陣列表示通用
 game: FH5                     # FH4 / FH5 / FH6
 version: Series 22            # 對應版本；不確定填「未標註」
-status: stable                # draft / stable / outdated
 sources:                      # 相對於專案根的路徑
   - Docs/_sources/地平線5-硬核調校指南_整理版.md
 last_updated: 2026-04-21      # 本檔最後實質修改日期
