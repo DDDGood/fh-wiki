@@ -1,8 +1,21 @@
 # FH6 遷移計畫
 
-> 狀態：Phase 1 已完成（2026-05-14, commit `d5ab65f`）；Phase 2/3 等 FH6 packet/來源
-> 建立日期：2026-05-14
+> **進度：Phase 1 完成 + Phase 2 前置完成（2026-05-14）**。剩餘 #5（FH6 packet）、Phase 3（FH6 內容）必須等遊戲實際上市才能進行。
+> 完成 commits：`d5ab65f`（基礎建設）、`6a002ef`（計畫追蹤）、`0375a40`（--game flag 與路由骨架）。
+> 建立日期：2026-05-14。
 > 目的：讓本專案（wiki 攻略庫 + 遙測工具）在 FH6 上市時能順利接軌，並保留跨代通用的知識資產。
+
+---
+
+## 目前可運作的能力
+
+實作完成後，本專案在 FH6 上市前已具備：
+
+1. **跨代版本標記與顯示**：每篇 wiki 含 `applies_to` 陣列，網站自動渲染色帶徽章；目前 42 fh5 / 4 horizon / 2 general。
+2. **session 遊戲版本標籤**：`meta.json.game` 由 recorder `--game` 旗標寫入（預設 `fh5`，FH6 上市後可用 `fh6` 或 `auto`）。
+3. **race-analyst 跨代過濾**：分析師依 `meta.game` 自動選用對應的 wiki `applies_to`；FH5 數值對 FH6 場次只當「起點參考」。
+4. **packet 抽象化**：`sled.py`（共用）+ `horizon_fh5.py`（FH5）+ `resolve_game()` 路由器；FH6 上市時只要新增 `horizon_fh6.py` 並在 `KNOWN_PACKET_SIZES` 加一行。
+5. **migrate 腳本**：`scripts/migrate_applies_to.py` 留作未來 schema 演進範本。
 
 ---
 
@@ -146,12 +159,16 @@ recorder 的賽事偵測狀態機（IsRaceOn / LapNumber / DistanceTraveled 為�
 
 ---
 
-## 暫未決定 / 待討論
+## 已決定事項（過去的待討論項）
 
-- [ ] `applies_to` 是否再細分 series 版本（如 `fh5-s40+`）？目前傾向不做，太細會變維護負擔。
-- [ ] 工具層是否要支援 FH4（社群仍活躍）？目前傾向**不主動支援**，但 sled.py 抽出後其實已具備能力。
-- [ ] 首頁是否需要改版成更明顯的系列入口？站名已可維持「Forza Horizon 攻略庫」。
-- [ ] 是否要在 `_sources/` frontmatter 也加 `applies_to`？目前傾向只標「原作對應版本」（單一值），整合到 wiki 時才轉成 `applies_to` 陣列。
+- ✅ **`_sources/` 版本標記**：採單值欄位「對應遊戲」（`FH5` / `FH6` / `跨多代` / `不確定`）寫在文件頂部引用區，由 `knowledge-curator` SKILL.md 強制執行；整合到 wiki 時才轉成 `applies_to` 陣列。
+- ✅ **網站站名**：維持「Forza Horizon 攻略庫」，不改版。徽章與 container 已能視覺區分內容歸屬。
+- ✅ **VitePress 篩選 UI**：延後至 FH6 內容累積後再做。
+
+## 仍未決定 / 待討論
+
+- [ ] `applies_to` 是否再細分 series 版本（如 `fh5-s40+`）？目前傾向不做，太細會變維護負擔。屆時若 FH5 末期數值與 FH6 初期實測明顯衝突，再考慮加 series 細分。
+- [ ] 工具層是否要支援 FH4（社群仍活躍）？目前傾向**不主動支援**，但 sled.py 抽出後其實已具備能力。若有強需求只需寫一份 `horizon_fh4.py`。
 
 ---
 

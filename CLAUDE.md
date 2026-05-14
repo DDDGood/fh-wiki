@@ -182,6 +182,7 @@ data/forza_telemetry/sessions/{...}/analysis.md  (駕駛/調校建議)
 | 腳本 | 用途 |
 |------|------|
 | `scripts/check_integration.sh` | 掃描 `_sources/` 中尚未被 `wiki/` 整合的原始攻略檔。用法：`bash scripts/check_integration.sh` |
+| `scripts/migrate_applies_to.py` | 一次性 frontmatter 遷移腳本（2026-05-14 game→applies_to）。已執行完畢，保留作為未來 wiki schema 演進的範本。用法：`python -m scripts.migrate_applies_to [--apply]` |
 
 以下情境應主動新增腳本：
 
