@@ -71,6 +71,10 @@ class RecorderConfig:
     socket_timeout: float = 1.0
     # Auto-generate summary.md after each session finalizes.
     auto_summarize: bool = True
+    # Game version label written into meta.json so race-analyst can pick
+    # version-appropriate wiki references. "auto" routes by first-packet size;
+    # FH6 support pending (see scripts/forza_telemetry/packet.py).
+    game: str = "fh5"
 
 
 @dataclass
@@ -305,7 +309,7 @@ class Recorder:
         self.state = State.IDLE
 
     def _enter_recording(self) -> None:
-        self._session = Session(output_root=self.config.output_dir)
+        self._session = Session(output_root=self.config.output_dir, game=self.config.game)
         buffered = list(self._buffer)
         self._session.write_packets(buffered)
         self._buffer.clear()

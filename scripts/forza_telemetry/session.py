@@ -38,6 +38,7 @@ REWIND_THRESHOLD_S = 0.1  # backward jump in CurrentRaceTime (seconds) that coun
 @dataclass
 class Session:
     output_root: Path
+    game: str = "fh5"  # game version label written to meta.json
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc).astimezone())
     folder: Path | None = None
     _csv_file: IO[str] | None = None
@@ -215,6 +216,7 @@ class Session:
                 car_block["db"] = db_entry
 
         meta = {
+            "game": self.game,
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "ended_at": ended_at.isoformat(timespec="seconds"),
             "duration_seconds": round(duration, 3),

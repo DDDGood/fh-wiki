@@ -8,6 +8,7 @@ import signal
 import sys
 from pathlib import Path
 
+from . import packet as pkt
 from .recorder import Recorder, RecorderConfig
 
 BANNER_TEMPLATE = """\
@@ -55,9 +56,21 @@ def main(argv: list[str] | None = None) -> int:
                              "so this only fires for truly abandoned sessions. Default: 300")
     parser.add_argument("--no-auto-summarize", action="store_false", dest="auto_summarize",
                         help="Disable auto-generation of summary.md when each session finalizes.")
+    parser.add_argument("--game", choices=["fh5", "fh6", "auto"], default="fh5",
+                        help="Game version label written to meta.json (so race-analyst picks "
+                             "version-appropriate wiki refs). 'auto' routes by first-packet size. "
+                             "FH6 support pending until horizon_fh6.py lands. Default: fh5")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Verbose logging (state transitions, first packet info)")
     args = parser.parse_args(argv)
+
+    # Resolve --game early so a bad request (e.g. fh6 before parser lands)
+    # fails fast with a clear message instead of running and writing wrong meta.
+    try:
+        resolved_game = pkt.resolve_game(args.game, packet_size=None)
+    except pkt.UnsupportedGameError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
 
     # Force UTF-8 for stdout/stderr so the Chinese banner renders correctly
     # on Windows consoles that default to Big5 / cp950.
@@ -87,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         buffer_seconds=args.buffer_seconds,
         idle_timeout_seconds=args.idle_timeout_seconds,
         auto_summarize=args.auto_summarize,
+        game=resolved_game,
     )
     recorder = Recorder(config=cfg)
 

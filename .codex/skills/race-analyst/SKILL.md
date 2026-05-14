@@ -400,7 +400,7 @@ percentile = (current - min) / (max - min) * 100
 
 ## 跨代版本（FH5 / FH6）與 wiki `applies_to` 過濾
 
-session 的 `meta.json` 可能有 `game: fh5|fh6` 欄位（FH6 上市後 recorder 才會寫；舊 session 沒有）。本 skill 在引用 wiki 時要依此過濾：
+session 的 `meta.json` 含 `game: fh5|fh6` 欄位（recorder 由 `--game` 旗標寫入，預設 `fh5`）。舊 session（FH6 計畫實作前的）沒這欄。本 skill 在引用 wiki 時要依此過濾：
 
 1. **讀 `meta.json.game`**：
    - 有值（`fh5` / `fh6`）→ 該值即「本場遊戲」

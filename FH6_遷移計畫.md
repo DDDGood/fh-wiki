@@ -128,12 +128,15 @@ recorder 的賽事偵測狀態機（IsRaceOn / LapNumber / DistanceTraveled 為�
    - `packet.py` 改為輕薄 facade，公開 API（`Packet` / `PACKET_SIZE` / `parse` / `PacketLengthError`）完全不變
    - smoke test 通過：PACKET_SIZE=323、85 fields、recorder / summarize CLI 正常
 
-### Phase 2（FH6 試玩版／beta／launch 當天）
+### Phase 2（部分前置可現在做；packet 路由本身等 FH6 上市）
 
-5. 抓 FH6 packet、寫 `horizon_fh6.py`
-6. recorder 加 `--game fh5|fh6|auto` 與封包路由邏輯
-7. `meta.json` 補 `game` 欄位
-8. race-analyst 依 `meta.game` 調整引用語氣：FH6 可用 `general` / `horizon` / `fh6`；FH5 數值只作起點參考
+5. ⏳ 抓 FH6 packet、寫 `horizon_fh6.py`（等 FH6 試玩版／beta／launch）
+6. ✅ recorder 加 `--game fh5|fh6|auto` flag（2026-05-14 完成；fh6 fail fast、auto 暫退回 fh5）
+   - `packet.resolve_game(requested, packet_size=None)` 統一路由邏輯
+   - `KNOWN_PACKET_SIZES` 字典在 FH6 packet 已知後加一行即可啟用 auto 偵測
+   - 真實 packet 級的路由（first-packet 動態偵測 → 選 parser）等 #5 完成後再接
+7. ✅ `meta.json` 補 `game` 欄位（2026-05-14 完成；Session 預設 `fh5`，由 RecorderConfig 傳入）
+8. ✅ race-analyst SKILL.md 已加 `applies_to` 過濾與 FH5/FH6 引用語氣規則（Phase 1 一併完成；雙版本同步）
 
 ### Phase 3（FH6 launch 後）
 

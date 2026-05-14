@@ -47,7 +47,9 @@ d:\Projects\Forza Horizon\
 ├── scripts\forza_telemetry\
 │   ├── __init__.py
 │   ├── __main__.py       錄製 CLI 入口（argparse、banner、signal handling）
-│   ├── packet.py         Car Dash 封包格式定義 + struct 解析
+│   ├── packet.py         Car Dash 封包組合層 + parse() + 跨代路由 resolve_game()
+│   ├── sled.py           FM7-compatible 232 bytes 共用核心 layout（跨 Forza 系列）
+│   ├── horizon_fh5.py    FH5 Dash extension layout（91 bytes 含 padding）
 │   ├── session.py        Session 資料夾、CSV writer、meta.json、rewind 偵測
 │   ├── recorder.py       UDP listener + 賽事偵測狀態機
 │   ├── summarize.py      raw.csv → summary.md 分析報告
@@ -375,6 +377,7 @@ data/forza_telemetry/sessions/{YYYY-MM-DD_HH-MM-SS}_car{CarOrdinal}_PI{Performan
 
 ```json
 {
+  "game": "fh5",
   "started_at": "2026-05-03T19:30:15+08:00",
   "ended_at":   "2026-05-03T19:34:48+08:00",
   "duration_seconds": 273.0,
@@ -412,6 +415,7 @@ data/forza_telemetry/sessions/{YYYY-MM-DD_HH-MM-SS}_car{CarOrdinal}_PI{Performan
 ```
 
 **欄位語意**：
+- `game`：遊戲版本標籤（`fh5` / `fh6`），由 `--game` 決定；race-analyst 依此挑選對應的 wiki `applies_to`。舊 session 沒這欄時 race-analyst 推定為 `fh5`
 - `car`：第一個封包的識別（賽事中換車不會重新建 session，所以以第一筆為準）
 - `car.db`：finalize 時從 `data/forza_telemetry/cars/{ordinal}.yml` 凍結進來的快照（**選填**，沒設檔就沒這欄）。包含車名、用途、當時的完整 tune——之後改 tune 不會回溯改動歷史 session
 - `race.total_laps`：本 session 看到的最大 `LapNumber`
