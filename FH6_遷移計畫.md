@@ -1,6 +1,6 @@
-# FH6 遷移計畫（暫定）
+# FH6 遷移計畫
 
-> 狀態：草稿 / 討論中
+> 狀態：Phase 1 已完成（2026-05-14, commit `d5ab65f`）；Phase 2/3 等 FH6 packet/來源
 > 建立日期：2026-05-14
 > 目的：讓本專案（wiki 攻略庫 + 遙測工具）在 FH6 上市時能順利接軌，並保留跨代通用的知識資產。
 
@@ -109,17 +109,24 @@ recorder 的賽事偵測狀態機（IsRaceOn / LapNumber / DistanceTraveled 為�
 
 ## 執行順序（建議）
 
-### Phase 1（現在～FH6 上市前，無時間壓力）
+### Phase 1（現在～FH6 上市前，無時間壓力）✅ 完成於 2026-05-14（commit `d5ab65f`）
 
-1. **frontmatter schema 升級**
-   - 在 `wiki-integrator` 規格中定義 `applies_to`
-   - 寫一個 `scripts/migrate_applies_to.py`，將既有 `game: FH5` 自動轉成 `applies_to: [fh5]` 作為初值
-2. **粗分類 pass**
-   - 只處理一眼明顯的文章：駕駛物理 → `[general]`，Forza Horizon 機制 → `[horizon]`
-   - 模糊或含大量 FH5 數值的文章維持 `[fh5]`，不要硬判
-   - 看到明確 FH5 數值段落時再補 container，不追求一次補完
-3. **VitePress 徽章與來源標記 UI** (由 `wiki-site-builder` 完成)
-4. **packet.py 重構**（拆 sled / horizon_fh5），不改行為，純結構整理
+1. ✅ **frontmatter schema 升級**
+   - `wiki-integrator` SKILL.md 已加 `applies_to` 規格與 container 用法
+   - `scripts/migrate_applies_to.py` 一次性轉換完成（48 檔，0 殘留 `game:` / `version:`）
+2. ✅ **粗分類 pass**（採保守策略：分布 42 fh5 / 4 horizon / 2 general）
+   - `[general]`：`cars/汽車基礎術語.md`、`cars/車型代號.md`
+   - `[horizon]`：`driving/賽車線與彎道基礎.md`、`driving/煞車技巧.md`、`driving/漂移基礎.md`、`driving/進階練習小技巧.md`
+   - 其餘維持 `[fh5]`（含 FH5 賽道實例或具體數值的就不硬升級）
+3. ✅ **VitePress 徽章 UI**
+   - `Docs/wiki/.vitepress/theme/components/AppliesToBadges.vue` + `index.ts` + `style.css`
+   - 已驗證 `npm run docs:build` 通過、徽章正確渲染（47/47 內容頁；首頁 layout=home 排除）
+   - 篩選 UI 依原則延後（等 FH6 內容累積）
+4. ✅ **packet.py 重構**（純結構，不改行為）
+   - 拆出 `scripts/forza_telemetry/sled.py`（FM7-compatible 232 bytes 共用核心）
+   - 拆出 `scripts/forza_telemetry/horizon_fh5.py`（FH5 Dash extension）
+   - `packet.py` 改為輕薄 facade，公開 API（`Packet` / `PACKET_SIZE` / `parse` / `PacketLengthError`）完全不變
+   - smoke test 通過：PACKET_SIZE=323、85 fields、recorder / summarize CLI 正常
 
 ### Phase 2（FH6 試玩版／beta／launch 當天）
 
