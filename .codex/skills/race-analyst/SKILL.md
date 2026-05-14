@@ -136,6 +136,7 @@ description: >
    - `meta.json` 是結構化基本資訊
    - 兩者都讀完整內容（不要 head/tail）
    - **也讀 `corners_detail.md`（若存在）**——top 3 重煞車彎的逐幀資料
+   - **檢查 `meta.car.db.specs`**（從 `data/forza_telemetry/cars/{ordinal}.yml` 凍結進來的）：若存在，後續產出要寫「車輛規格基準」段落（見 Phase 4），讓 telemetry 數字有對照框架
 
 3. **如果 summary.md 不存在**：
    - 先跑 `python -m scripts.forza_telemetry.summarize <session 資料夾>` 產生
@@ -248,7 +249,29 @@ wiki 給的候選：
 
 收到答覆後納入推理。**不要假設玩家用預設值**——多數使用者都調過 tune。
 
-#### 6. 排優先級
+#### 6. 用 `tune_ranges` 做百分位診斷（彈簧 / 車高 / 空力）
+
+FH5 滑桿端點**因車而異**（Focus RS 彈簧上限 265、另一台車 165）——「彈簧 200 算硬」這種絕對基準會誤判。
+
+若 `meta.car.db.tune_ranges` 存在，**對該幾項**：
+```
+percentile = (current - min) / (max - min) * 100
+```
+
+輸出時帶上百分位資訊，例：
+- 「目前後彈簧 125（範圍 80-265 中的 24%，**偏軟那端**）→ 想再軟空間有限，建議改攻 ARB」
+- 「前空力 80（範圍 0-200 中的 40%，**中段偏低**）→ 還有上調空間」
+
+**沒有 `tune_ranges` 時**：退回「降 1-2 級」這類小步幅度建議，**不要編造範圍**。
+
+通用範圍（FH5 多數車一致，可寫死、不必逐車記）：
+- damping: 1-20
+- ARB: 1-65
+- 差速器（accel/decel/center）: 0-100
+- 剎車（balance/pressure）: 0-100
+- camber: -5.0 to 0.0（多數情境用負值）
+
+#### 7. 排優先級
 
 最終建議照下列順位排：
 1. **撞車 / 駕駛輔助設定異常** → 必先處理（沒乾淨資料調校沒意義）
@@ -265,6 +288,18 @@ wiki 給的候選：
 
 ```markdown
 # 賽事分析建議
+
+## 🚗 車輛規格基準
+（**僅當 `meta.car.db.specs` 存在時才寫此段**——讓後續 telemetry 數字有對照框架）
+
+| 規格 | 數值 | 本場 telemetry | 對照解讀 |
+|------|------|---------------|---------|
+| 推重比 | X.XX hp/kg（= power_hp / weight_kg） | — | （給類別參考：A 級典型 0.40-0.55 hp/kg） |
+| 極速 | Y km/h | summary 觀測 max Z km/h | 落差 N% → {齒比過短 / 齒比 OK / 賽道不夠長} |
+| 0-100 | A 秒 | （summary 沒直接記，可從 raw 推估或忽略） | — |
+| 極限側向 G | B G | summary 觀測 peak C G | 利用率 (C/B)×100% → {還有餘裕 / 接近極限 / 已超} |
+
+> 規格來源：`data/forza_telemetry/cars/{ordinal}.yml`（凍結於本場 session 的 meta.json）。
 
 ## 症狀總結
 （從 TL;DR 抽出，按嚴重度排序，每條 1 句話）
@@ -363,13 +398,30 @@ wiki 給的候選：
 
 ---
 
+## 跨代版本（FH5 / FH6）與 wiki `applies_to` 過濾
+
+session 的 `meta.json` 可能有 `game: fh5|fh6` 欄位（FH6 上市後 recorder 才會寫；舊 session 沒有）。本 skill 在引用 wiki 時要依此過濾：
+
+1. **讀 `meta.json.game`**：
+   - 有值（`fh5` / `fh6`）→ 該值即「本場遊戲」
+   - 無 `game` 欄位 → 預設視為 `fh5`（舊資料推定），可在 analysis 開頭一句話註明「本場 game 欄位缺、推定為 FH5」
+2. **wiki 引用優先順序**（讀 wiki 檔 frontmatter `applies_to`）：
+   - `applies_to` 含當前 `game` 值 → ✅ 直接引用
+   - `applies_to` 含 `general` 或 `horizon` → ✅ 直接引用
+   - `applies_to` 只含**其他**代別（例：本場 `fh6`、頁面標 `[fh5]`）→ ⚠️ 只能當「起點參考」引用，且在 analysis 文字中明確標出：「**本頁基於 FH5，FH6 數值可能不同，僅作起點參考**」
+3. **FH5 數值對 FH6 場次**：當你必須引用 FH5 數值（因為 FH6 還沒累積對應 wiki）時，**不要把數值當處方下**，只說「FH5 經驗值約在 X，可作為起點。若實測不同以 FH6 為準」
+4. **不挑邊**：若 wiki 已有 FH5 與 FH6 衝突的併列數據，依「衝突不合併」原則保留兩列，讓玩家自判
+
+---
+
 ## 不可違反
 
-1. **必須讀 wiki**——不要靠 LLM 自己的 Forza 知識直接給建議。wiki 是專案累積的、經過審查的知識，比 LLM 預訓練更新且更貼合 FH5。
+1. **必須讀 wiki**——不要靠 LLM 自己的 Forza 知識直接給建議。wiki 是專案累積的、經過審查的知識，比 LLM 預訓練更新且更貼合本作。
 2. **每條調校建議都要引用 wiki 頁面**——讓使用者可以追溯
-3. **絕不建議使用者超出 FH5 限制的數值**（例如負胎壓、車高 -10cm）。如果不確定範圍，引用 wiki 並讓使用者自查
-4. **不要刪除或修改既有的 summary.md / meta.json**——本 skill 是純讀寫一份新 analysis.md
-5. **繁體中文輸出**——遵循專案 CLAUDE.md 的語言規範
+3. **遵守 `applies_to` 過濾規則**（見上節）——不要把 FH5 數值當成 FH6 處方
+4. **絕不建議使用者超出遊戲限制的數值**（例如負胎壓、車高 -10cm）。如果不確定範圍，引用 wiki 並讓使用者自查
+5. **不要刪除或修改既有的 summary.md / meta.json**——本 skill 是純讀寫一份新 analysis.md
+6. **繁體中文輸出**——遵循專案 CLAUDE.md 的語言規範
 
 ---
 

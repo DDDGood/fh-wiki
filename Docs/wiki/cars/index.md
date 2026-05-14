@@ -1,5 +1,6 @@
 ---
 title: 車輛介紹
+applies_to: [fh5]
 ---
 
 # 🚗 車輛介紹

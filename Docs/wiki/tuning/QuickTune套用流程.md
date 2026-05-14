@@ -5,8 +5,7 @@ order: 130
 tags: [QuickTune, 流程, 套用步驟, 速查]
 related_cars: []
 pi_class: []
-game: FH5
-version: 未標註
+applies_to: [fh5]
 sources:
   - Docs/_sources/地平線5_QuickTune完整調校指南_整理版.md
   - Docs/_sources/HokiHoshi_FH5_2021調校教學_整理版.md

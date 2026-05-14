@@ -5,8 +5,7 @@ order: 40
 tags: [RWD, 後驅, launch, 重量轉移, throttle-management, 駕駛技巧]
 related_cars: []
 pi_class: []
-game: FH5
-version: 未標註
+applies_to: [fh5]
 sources:
   - Docs/_sources/HokiHoshi_FH5_2021RWD完整指南_整理版.md
 last_updated: 2026-05-04

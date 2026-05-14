@@ -235,11 +235,11 @@ argument-hint: "<_sources 檔名或完整路徑，留白=掃描所有未整合�
 ---
 title: 差速器調校
 category: tuning
+order: 30                     # 側欄排序：遊戲頁面項目 10/20/30…，基礎概念 5，補充資料 100+
 tags: [差速器, 進階, 後驅]
 related_cars: []              # 車型 ID 或通用類型；為空即表示通用
 pi_class: [A, S1]             # 適用 PI 等級；空陣列表示通用
-game: FH5                     # FH4 / FH5 / FH6
-version: Series 22            # 對應版本；不確定填「未標註」
+applies_to: [fh5]             # 跨代版本標記，見下節「applies_to 規則」
 sources:                      # 相對於專案根的路徑
   - Docs/_sources/地平線5-硬核調校指南_整理版.md
 last_updated: 2026-04-21      # 本檔最後實質修改日期
@@ -251,8 +251,47 @@ revisions:                    # 修訂歷程，最新在下
 **禁止**：
 - 虛構 `sources`（沒看過的來源不能列）
 - `last_updated` 亂填
-- `version` 猜（真的不確定就填「未標註」）
+- 漏 `applies_to`（必填；不確定就標單代別如 `[fh5]`，不要為了「看起來通用」硬升到 `[general]`）
+- 舊欄位 `game` / `version` / `status` — 不要保留也不要新增（已由 `applies_to` 取代；migrate 腳本會自動轉舊檔）
 - `revisions` 的 flow mapping `{ date, note }` 內 note 值**禁止**含 `[文字](連結)` markdown 連結語法、`{ }`、`[ ]`、未配對引號 — YAML 會把 `[` 當成內嵌序列開頭導致 `vitepress build` 解析失敗。要指涉其他條目用純文字「防傾桿條目」或加引號 `note: "..."`
+
+### `applies_to` 規則
+
+跨代版本標記，採低維護粗分類：
+
+| 值 | 意義 | 典型內容 |
+|---|---|---|
+| `general` | 純物理／駕駛原理，通常跨遊戲通用 | 走線、weight transfer、煞車原理、understeer/oversteer 概念 |
+| `horizon` | Forza Horizon 系列大致通用的遊戲機制；不代表已對 FH6 正式驗證 | PI 系統、A/S1/S2 class、Tune UI 結構、UDP Data Out 概念 |
+| `fh4` / `fh5` / `fh6` | 某代專屬數值、車庫車單、Series 活動、UI 文案 | QuickTune 基準值、特定車型調校、季節活動 |
+
+- 為**陣列**，可組合：`[fh5]` / `[general]` / `[horizon]` / `[fh5, fh6]`（兩代沿用）
+- 預設新文標 `[fh5]`，由整合者依主題判斷是否升級到 `[horizon]` / `[general]`
+- **模糊地帶不要硬判**——含大量 FH5 數值的文章維持 `[fh5]`，不要為了「看起來通用」硬升級
+
+#### 部分綁版本：用 container 標記段落
+
+主文標 `[general]` 或 `[horizon]` 但內部某段落確實是 FH5 數值時，用 VitePress container 包住：
+
+```markdown
+::: warning FH5 來源數值
+以下基準值來自 FH5。FH6 初期可作為起點參考，但若實測不同，以 FH6 新資料為準。
+:::
+```
+
+不另開檔——保持線性閱讀流暢，避免被迫 fork 整篇。
+
+#### NEW/MERGE 階段如何選 `applies_to`
+
+| 來源類型 | 預設 `applies_to` |
+|---|---|
+| FH5 影片字幕／文章／論壇 | `[fh5]` |
+| FH6 來源 | `[fh6]` |
+| 純物理／駕駛原理（書、跨遊戲教學）| `[general]` |
+| 跨多代 Forza 都通用的機制說明 | `[horizon]` |
+| FH4 來源 | `[fh4]`（罕見） |
+
+REVISE 階段若新來源證實舊文亦適用新代別，可擴充陣列（如 `[fh5]` → `[fh5, fh6]`），但必須有實際依據，**不要為了「看起來通用」自己加**。
 
 ---
 

@@ -119,11 +119,11 @@ argument-hint: "<主題名稱> [目標分類]  例：差速器進階 tuning"
 ---
 title: {主題}
 category: {category}
+order: {依「側欄排序慣例」：遊戲頁面項目 10/20/30…、基礎概念 5、補充資料 100+}
 tags: [...]
 related_cars: []
 pi_class: []
-game: FH5
-version: 未標註
+applies_to: [fh5]   # 預設 [fh5]；綜合來源跨多代或為純物理時可標 [horizon] 或 [general]，詳見 wiki-integrator SKILL.md
 sources:
   - Docs/_sources/{source1}.md
   - Docs/_sources/{source2}.md

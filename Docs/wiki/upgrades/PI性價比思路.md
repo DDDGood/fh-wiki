@@ -5,8 +5,7 @@ order: 100
 tags: [PI, 性價比, 改裝思路, 配重, 卡 PI]
 related_cars: []
 pi_class: []
-game: FH5
-version: 未標註
+applies_to: [fh5]
 sources:
   - Docs/_sources/地平線5-硬核調校指南_整理版.md
   - Docs/_sources/HokiHoshi_FH5_2025改裝速成_整理版.md

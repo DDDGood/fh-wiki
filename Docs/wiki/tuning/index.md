@@ -1,5 +1,6 @@
 ---
 title: 車輛調校
+applies_to: [fh5]
 ---
 
 # 🔧 車輛調校

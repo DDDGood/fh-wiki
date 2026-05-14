@@ -5,8 +5,7 @@ order: 120
 tags: [QuickTune, 參考, 基準值, 胎壓, 定位, 防傾桿, 彈簧, 車高, 阻尼, 煞車, 差速器, 齒比, 空力]
 related_cars: []
 pi_class: []
-game: FH5
-version: 未標註
+applies_to: [fh5]
 sources:
   - Docs/_sources/地平線5_QuickTune完整調校指南_整理版.md
 last_updated: 2026-04-21

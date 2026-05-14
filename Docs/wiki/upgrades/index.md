@@ -1,5 +1,6 @@
 ---
 title: 車輛改裝
+applies_to: [fh5]
 ---
 
 # ⚙️ 車輛改裝

@@ -79,6 +79,35 @@ argument-hint: "<session 資料夾路徑或 summary.md 路徑，可省略則用�
 
 ---
 
+## 重要前提：可疑外部事實要上網查證
+
+分析優先順序是：`summary.md` 找線索 → `raw.csv` 驗證資料 → `Docs/wiki/` 找專案內知識 → **必要時上網查證外部事實**。網路搜尋是疑慮處理工具，不是取代 wiki 或 raw 的捷徑。
+
+### 何時要上網搜尋
+
+遇到以下情況，先明確說「這是外部事實疑慮」，再搜尋：
+
+- **Forza Data Out / UDP packet 規格疑慮**：欄位型別、offset、單位、FH5 是否和 FM7/FH4 不同。
+- **遊戲版本或 Series 更新可能影響判讀**：調校上限、PI 規則、輪胎/空力/差速器行為是否近期改過。
+- **summary 或 parser 的物理結果不合理**，且 raw 驗證後仍無法解釋。
+- **wiki 沒有覆蓋的車輛、配件、賽事、設定怪癖**，但建議依賴該外部事實。
+- **使用者描述和專案資料衝突**，需要確認是否有已知 bug、社群共識或官方說明。
+
+### 搜尋來源優先順序
+
+1. 官方 Forza Support / Forza forums / 遊戲內可驗證資訊。
+2. 已知 telemetry 實作或資料規格 repo，例如 `holgerkenn/Forza-IoT-Relay`、`raweceek-temeletry/forza-horizon-5-UDP`、`austinbaccus/forza-telemetry`。
+3. 高品質社群討論、Reddit、Steam 指南、YouTube/Bilibili 教學。
+
+引用外部資料時，要在 `analysis.md` 裡標註來源連結與查證日期。若外部資料只是一則主觀調校配方，不要直接把它當處方；只能作為「可參考的假設」，仍需回到本場 telemetry 與 wiki 驗證。
+
+### 查到有價值內容時
+
+- 若是穩定、可重用的知識，建議使用者後續用 `knowledge-curator` 收錄到 `Docs/_sources/`，再由 `wiki-integrator` 精煉進 wiki。
+- 若是暫時性資訊（近期 patch、活動規則、論壇 bug 回報），只放在本次 `analysis.md` 的「外部查證」段，不直接寫進 wiki。
+
+---
+
 ## 觸發時機
 
 使用者說：
@@ -371,13 +400,30 @@ percentile = (current - min) / (max - min) * 100
 
 ---
 
+## 跨代版本（FH5 / FH6）與 wiki `applies_to` 過濾
+
+session 的 `meta.json` 可能有 `game: fh5|fh6` 欄位（FH6 上市後 recorder 才會寫；舊 session 沒有）。本 skill 在引用 wiki 時要依此過濾：
+
+1. **讀 `meta.json.game`**：
+   - 有值（`fh5` / `fh6`）→ 該值即「本場遊戲」
+   - 無 `game` 欄位 → 預設視為 `fh5`（舊資料推定），可在 analysis 開頭一句話註明「本場 game 欄位缺、推定為 FH5」
+2. **wiki 引用優先順序**（讀 wiki 檔 frontmatter `applies_to`）：
+   - `applies_to` 含當前 `game` 值 → ✅ 直接引用
+   - `applies_to` 含 `general` 或 `horizon` → ✅ 直接引用
+   - `applies_to` 只含**其他**代別（例：本場 `fh6`、頁面標 `[fh5]`）→ ⚠️ 只能當「起點參考」引用，且在 analysis 文字中明確標出：「**本頁基於 FH5，FH6 數值可能不同，僅作起點參考**」
+3. **FH5 數值對 FH6 場次**：當你必須引用 FH5 數值（因為 FH6 還沒累積對應 wiki）時，**不要把數值當處方下**，只說「FH5 經驗值約在 X，可作為起點。若實測不同以 FH6 為準」
+4. **不挑邊**：若 wiki 已有 FH5 與 FH6 衝突的併列數據，依「衝突不合併」原則保留兩列，讓玩家自判
+
+---
+
 ## 不可違反
 
-1. **必須讀 wiki**——不要靠 LLM 自己的 Forza 知識直接給建議。wiki 是專案累積的、經過審查的知識，比 LLM 預訓練更新且更貼合 FH5。
+1. **必須讀 wiki**——不要靠 LLM 自己的 Forza 知識直接給建議。wiki 是專案累積的、經過審查的知識，比 LLM 預訓練更新且更貼合本作。
 2. **每條調校建議都要引用 wiki 頁面**——讓使用者可以追溯
-3. **絕不建議使用者超出 FH5 限制的數值**（例如負胎壓、車高 -10cm）。如果不確定範圍，引用 wiki 並讓使用者自查
-4. **不要刪除或修改既有的 summary.md / meta.json**——本 skill 是純讀寫一份新 analysis.md
-5. **繁體中文輸出**——遵循專案 CLAUDE.md 的語言規範
+3. **遵守 `applies_to` 過濾規則**（見上節）——不要把 FH5 數值當成 FH6 處方
+4. **絕不建議使用者超出遊戲限制的數值**（例如負胎壓、車高 -10cm）。如果不確定範圍，引用 wiki 並讓使用者自查
+5. **不要刪除或修改既有的 summary.md / meta.json**——本 skill 是純讀寫一份新 analysis.md
+6. **繁體中文輸出**——遵循專案 CLAUDE.md 的語言規範
 
 ---
 

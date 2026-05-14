@@ -4,10 +4,10 @@
 
 ## 專案定位
 
-這個 repo 是一個 Forza Horizon 5 的繁體中文攻略與遙測分析專案，主要有兩條線：
+這個 repo 是一個 **Forza Horizon 系列**的繁體中文攻略與遙測分析專案（目前主要內容對應 FH5，FH6 上市後逐步擴充），主要有兩條線：
 
 1. **攻略知識庫**：把 Bilibili、YouTube、PDF、論壇、Reddit 等來源整理成繁體中文 `_sources/`，再精煉整合到 `Docs/wiki/`。
-2. **FH5 遙測工具**：透過 UDP Data Out 錄製賽事資料，產生 `raw.csv`、`meta.json`、`summary.md`，再用 wiki 知識產出賽事分析與調校建議。
+2. **遙測工具**：透過 UDP Data Out 錄製賽事資料，產生 `raw.csv`、`meta.json`、`summary.md`，再用 wiki 知識產出賽事分析與調校建議。目前 packet parser 對應 FH5；FH6 上市後依實際封包擴充。
 
 專案的寫作語言預設是**繁體中文**。車廠、車型、遊戲專有名詞保留原拼寫，例如 BRZ、Evora、Viper、S1、A 組。
 
@@ -102,12 +102,11 @@ Codex 沒有直接執行 `.claude/skills` 的機制，但可以把它們當作�
 ---
 title: 差速器調校
 category: tuning
+order: 30
 tags: [差速器, 進階, 後驅]
 related_cars: []
 pi_class: [A, S1]
-game: FH5
-version: 未標註
-status: stable
+applies_to: [fh5]
 sources:
   - Docs/_sources/地平線5-硬核調校指南_整理版.md
 last_updated: 2026-05-04
@@ -116,7 +115,29 @@ revisions:
 ---
 ```
 
-不可虛構 `sources`，不確定版本就填 `未標註`。遇到來源數值衝突，預設併列或標記待確認，不自行挑一邊。
+不可虛構 `sources`。遇到來源數值衝突，預設併列或標記待確認，不自行挑一邊。
+
+### `applies_to` 標記（取代舊欄位 `game`）
+
+跨代版本標記採低維護粗分類：
+
+| 值 | 意義 |
+|---|---|
+| `general` | 純物理／駕駛原理，通常跨遊戲通用（走線、weight transfer、煞車原理） |
+| `horizon` | Forza Horizon 系列大致通用的遊戲機制；不代表已對 FH6 正式驗證（PI 系統、Tune UI、UDP Data Out 概念） |
+| `fh4` / `fh5` / `fh6` | 某代專屬數值、車庫車單、Series 活動、UI 文案 |
+
+陣列、可組合（如 `[fh5, fh6]`）。預設新文標 `[fh5]`，模糊地帶不要硬升級到 `general`。
+
+部分綁版本的文章主文標 `[general]` / `[horizon]`，內部 FH5 數值段落用 VitePress container：
+
+```markdown
+::: warning FH5 來源數值
+以下基準值來自 FH5。FH6 初期可作為起點參考，但若實測不同，以 FH6 新資料為準。
+:::
+```
+
+完整原則見 `CLAUDE.md` 的「跨代版本標記慣例」與 [FH6_遷移計畫.md](FH6_遷移計畫.md)。
 
 ## 可量化規則
 

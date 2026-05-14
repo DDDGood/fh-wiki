@@ -38,4 +38,5 @@ features:
     title: 活動與賽事
     details: 季節、故事、EventLab、成就
     link: /events/
+applies_to: [fh5]
 ---

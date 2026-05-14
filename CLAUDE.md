@@ -2,7 +2,7 @@
 
 ## 專案概述
 
-本專案是 **Forza Horizon 系列（主要為 5 代）的繁體中文攻略庫**。
+本專案是 **Forza Horizon 系列的繁體中文攻略庫**（目前主要內容對應 FH5，FH6 上市後逐步擴充）。
 來源可能是 Bilibili 影片字幕、YouTube、Reddit、官方 Wiki、Steam 指南、PDF、論壇貼文、圖片截圖等，經整理後統一以繁體中文 Markdown 形式收錄於 `Docs/`。
 
 所有對話與輸出**一律使用繁體中文**。
@@ -113,6 +113,47 @@ data/forza_telemetry/sessions/{...}/analysis.md  (駕駛/調校建議)
 7. **`_sources/` 是聖域**：`bilibili-to-doc` 與 `knowledge-curator` 寫入後，**永不修改**其中檔案。任何精煉、去蕪存菁都在 `wiki/` 做。
 8. **wiki 檔必含 frontmatter**：每份 `wiki/**/*.md` 都要有完整 frontmatter（title/category/tags/sources/last_updated/revisions 等），格式見 `wiki-integrator` SKILL.md「Frontmatter 規格」章節。缺一不可，否則靜態網站建置會出錯。
 9. **衝突不合併**：多份來源在同一數值上意見不同時，**絕不自己挑一個**，用表格併列 + 各自來源引註，讓讀者自判。
+10. **跨代版本要明確標記**：每份 `wiki/**/*.md` 必含 `applies_to` 陣列（取代舊欄位 `game`）；對外發佈的網站會依此顯示徽章。詳見下節。
+
+---
+
+## 跨代版本標記慣例
+
+本專案橫跨 Forza Horizon 系列（FH4 / FH5 / FH6…），同一篇文章可能部分跨代通用、部分綁特定代別。為了讓讀者一眼看出**哪些知識可以信任、哪些是舊版起點參考**，採用低維護的粗分類標記。
+
+### 分類定義（`applies_to`）
+
+| 值 | 意義 | 典型內容 |
+|---|---|---|
+| `general` | 純物理／駕駛原理，通常跨遊戲通用 | 走線、weight transfer、understeer/oversteer 概念、煞車原理 |
+| `horizon` | Forza Horizon 系列大致通用的遊戲機制；不代表已對 FH6 正式驗證 | PI 系統、A/S1/S2 class、Tune UI 結構、UDP Data Out 概念 |
+| `fh4` / `fh5` / `fh6` | 某代專屬的數值、車庫車單、Series 活動、UI 文案 | QuickTune 基準值、特定車型調校範本、季節活動 |
+
+- `applies_to` 為陣列，可組合。`[fh5, fh6]` 表示兩代都有來源或已在實際使用中沿用；**不代表逐項做過審核**。
+- 廢止舊欄位 `game`，但短期保留向後相容（migrate 腳本會自動轉）。
+- frontmatter 必填。新建 wiki 檔時依主題判斷預設值；不確定就標單代別，不要為了「看起來通用」硬升級到 `general`。
+
+### 部分綁版本的文章
+
+主文標為 `[general]` 或 `[horizon]`，但內部段落確實是 FH5 數值時，用 VitePress container 包住：
+
+```markdown
+::: warning FH5 來源數值
+以下基準值來自 FH5。FH6 初期可作為起點參考，但若實測不同，以 FH6 新資料為準。
+:::
+```
+
+不另開檔（保持線性閱讀流暢，避免被迫 fork 整篇）。
+
+### 維護原則
+
+- **不做逐篇 FH6 驗證**：維護成本太高，不符合本專案使用方式。
+- **保留來源版本，不追求證書式適用範圍**：文章來自 FH5 來源就先標 `[fh5]`；FH6 新來源就標 `[fh6]`。
+- **粗分即可**：只把明顯跨代的物理／駕駛概念標成 `general`，模糊地帶不要硬判。
+- **發現差異再修**：FH6 實測或新來源證明數值不同時，再補段落、表格或警告。
+- **FH5 內容不急著清算**：過渡期讓它保留價值，FH6 分析時加註限制即可。
+
+完整背景與遷移計畫見 [FH6_遷移計畫.md](FH6_遷移計畫.md)。
 
 ---
 

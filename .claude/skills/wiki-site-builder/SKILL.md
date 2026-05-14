@@ -378,6 +378,104 @@ features:
 
 ---
 
+## `applies_to` 徽章（跨代版本標記）
+
+每份 wiki 檔的 frontmatter 都有 `applies_to: [...]`（見 CLAUDE.md「跨代版本標記慣例」與 `wiki-integrator` SKILL.md「Frontmatter 規格」）。網站端要把這個陣列**自動轉成色帶徽章**顯示在文章頂部，讓讀者一眼看出文章對應哪一代。
+
+### 徽章規格
+
+| 值 | 顯示文字 | 顏色 |
+|---|---|---|
+| `general` | 🌐 通用原理 | 綠 `#10b981` |
+| `horizon` | 🏁 Horizon 系列 | 藍 `#3b82f6` |
+| `fh4` | FH4 | 灰 `#6b7280` |
+| `fh5` | FH5 | 橘 `#f59e0b` |
+| `fh6` | FH6 | 紫 `#8b5cf6` |
+
+顯示位置：文章 H1 標題之下、正文之上（VitePress `doc-before` slot 或自訂 Layout）。
+
+### 實作方式
+
+**做法 A（推薦，零組件）**：在 `Docs/wiki/.vitepress/theme/index.ts` 自訂 Layout，用 slot `doc-before` 渲染徽章：
+
+```ts
+// Docs/wiki/.vitepress/theme/index.ts
+import DefaultTheme from 'vitepress/theme'
+import { h } from 'vue'
+import AppliesToBadges from './components/AppliesToBadges.vue'
+import './style.css'
+
+export default {
+  extends: DefaultTheme,
+  Layout() {
+    return h(DefaultTheme.Layout, null, {
+      'doc-before': () => h(AppliesToBadges)
+    })
+  }
+}
+```
+
+```vue
+<!-- Docs/wiki/.vitepress/theme/components/AppliesToBadges.vue -->
+<script setup lang="ts">
+import { useData } from 'vitepress'
+const { frontmatter } = useData()
+
+const LABELS: Record<string, { text: string; color: string }> = {
+  general:  { text: '🌐 通用原理',    color: '#10b981' },
+  horizon:  { text: '🏁 Horizon 系列', color: '#3b82f6' },
+  fh4:      { text: 'FH4',             color: '#6b7280' },
+  fh5:      { text: 'FH5',             color: '#f59e0b' },
+  fh6:      { text: 'FH6',             color: '#8b5cf6' },
+}
+</script>
+
+<template>
+  <div v-if="frontmatter.applies_to?.length" class="applies-to">
+    <span
+      v-for="key in frontmatter.applies_to"
+      :key="key"
+      class="badge"
+      :style="{ backgroundColor: LABELS[key]?.color || '#999' }"
+    >{{ LABELS[key]?.text || key }}</span>
+  </div>
+</template>
+
+<style scoped>
+.applies-to { display: flex; gap: 6px; margin: -8px 0 16px; flex-wrap: wrap; }
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: white;
+}
+</style>
+```
+
+**做法 B（純 CSS、無 Vue）**：用 `.vitepress/theme/style.css` 加 `::before` 偽元素讀 frontmatter——VitePress 不直接支援，需要透過 `transformPageData` hook 把 `applies_to` 注入 `<body>` data 屬性。**較複雜、不推薦**。
+
+### `::: warning FH5 來源數值` Container
+
+VitePress 預設已支援 `::: warning`、`::: tip`、`::: danger` 等 container，**不需額外組件**。`wiki-integrator` 會把 FH5 限定段落用 `::: warning FH5 來源數值` 包住，VitePress 會自動渲染成黃色警告框。
+
+若想讓「FH5 來源數值」這種 container 標題顯示為特定樣式（如橘色），可在 `style.css` 微調：
+
+```css
+.custom-block.warning:has(.custom-block-title:has-text("FH5")) {
+  border-color: #f59e0b;
+}
+```
+
+但這層客製是錦上添花，**不必在 Phase 1 做**。
+
+### 篩選 UI（暫不做）
+
+依 [FH6_遷移計畫.md](../../../FH6_遷移計畫.md) Phase 1 原則：**篩選 UI 先不急著做全功能**。徽章先做，等 FH6 內容累積後再考慮「只看 FH6 來源」「只看通用」等切換器。屆時可在 `nav` 加下拉選單，或在側邊欄分區塊。
+
+---
+
 ## 常見任務
 
 ### 新增分類

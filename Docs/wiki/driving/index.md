@@ -1,5 +1,6 @@
 ---
 title: 駕駛操作
+applies_to: [fh5]
 ---
 
 # 🏁 駕駛操作

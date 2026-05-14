@@ -1,5 +1,6 @@
 ---
 title: 遊戲設定
+applies_to: [fh5]
 ---
 
 # 🎮 遊戲設定
